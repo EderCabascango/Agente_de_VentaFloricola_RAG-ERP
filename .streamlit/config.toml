@@ -1,0 +1,8 @@
+# Solo accesible desde este equipo: nadie en la misma red (p. ej. el Wi-Fi de la sala) puede abrir
+# la app ni aprobar pedidos. Para compartirla en red, cambia address y agrega autenticación.
+[server]
+address = "localhost"
+headless = true
+
+[browser]
+gatherUsageStats = false
