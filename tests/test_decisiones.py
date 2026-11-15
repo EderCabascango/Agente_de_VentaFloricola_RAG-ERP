@@ -6,7 +6,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from mock_llm import ScriptedChatModel, llamar, responder, tool_call
 from src.escenarios import ESCENARIOS
-from src.graph import _aplanar_para_responder, build_graph, recortar_historial
+from src.graph import _aplanar_para_responder, build_graph, pendiente_de_aprobacion, recortar_historial
 from src.grounding import verificar_grounding
 from src.guardrails import detectar_intencion
 from src.validators import validar_borrador
@@ -98,3 +98,146 @@ def test_rechazo_del_validador_fuerza_respuesta_sin_tools():
     g.invoke({"messages": [HumanMessage(content=ESCENARIOS[2]["mensaje"])]}, conf)
     assert vistos == [False, False], "la respuesta tras el rechazo va con contexto aplanado (sin ToolMessages)"
     assert g.get_state(conf).values["grounding"]["ok"]
+
+
+# ------------------------------------------------------------------ mejoras de venta (conversación real por WhatsApp)
+from src.erp_client import ERPClient
+from src.guardrails import es_confirmacion
+from src.validators import a_tallos
+
+
+def test_cajas_y_bonches_se_convierten_a_tallos_en_codigo():
+    assert a_tallos(60, "cajas") == (24000, 400)
+    assert a_tallos(10, "bonches") == (250, 25)
+    assert a_tallos(100, None) == (100, 1)
+    assert a_tallos(5, "toneladas")[1] is None
+
+
+def test_pedido_en_cajas_no_se_rechaza_por_bonche():
+    """Falla real: '60 cajas de Mondial' se tomó como 60 tallos y se rechazó por no completar bonches."""
+    r = validar_borrador({"cliente": "C001", "items": [{"sku": "Mondial", "cantidad": 10, "unidad": "cajas"}]})
+    assert r.aprobado and r.lineas[0].cantidad == 4000 and r.lineas[0].sku == "ROS-005"
+    assert any("10 cajas = 4000 tallos" in c.detalle for c in r.checks)
+
+
+def test_pedido_en_bonches():
+    r = validar_borrador({"cliente": "C001", "items": [{"sku": "Mondial", "cantidad": 8, "unidad": "bonches"}]})
+    assert r.aprobado and r.lineas[0].cantidad == 200
+
+
+def test_cajas_que_superan_el_stock_ofrecen_alternativas_calculadas():
+    r = validar_borrador({"cliente": "C001", "items": [{"sku": "Mondial", "cantidad": 60, "unidad": "cajas"}]})
+    assert not r.aprobado
+    assert any("pide 24000 tallos" in m for m in r.motivos)
+    assert any("máximo 8000 tallos" in a for a in r.alternativas)
+
+
+def test_unidad_desconocida_se_rechaza():
+    r = validar_borrador({"cliente": "C001", "items": [{"sku": "Mondial", "cantidad": 2, "unidad": "toneladas"}]})
+    assert not r.aprobado and any("no reconocida" in m for m in r.motivos)
+
+
+def test_producto_ambiguo_pregunta_en_vez_de_elegir():
+    """'Freedom' existe en 50, 60 y 70 cm: el código no puede elegir por el cliente."""
+    r = validar_borrador({"cliente": "C001", "items": [{"sku": "Freedom", "cantidad": 500}]})
+    assert not r.aprobado and not r.lineas
+    assert any("varias flores" in m for m in r.motivos)
+    assert any("50 cm" in a and "60 cm" in a and "70 cm" in a for a in r.alternativas)
+    # con el largo, ya no es ambiguo
+    assert validar_borrador({"cliente": "C001", "items": [{"sku": "Freedom roja 60 cm", "cantidad": 500}]}).aprobado
+
+
+def test_cotizacion_ambigua_devuelve_opciones_y_en_cajas_el_equivalente():
+    from src.tools import calcular_cotizacion
+    amb = calcular_cotizacion.invoke({"producto": "Freedom", "cantidad": 100})
+    assert "opciones" in amb and len(amb["opciones"]) == 3
+    r = calcular_cotizacion.invoke({"producto": "Mondial", "cantidad": 5, "unidad": "cajas", "cliente": "C001"})
+    assert r["cantidad"] == 2000 and r["equivale"] == "5 cajas = 2000 tallos" and r["descuento_aplicable_pct"] == 5.0
+
+
+def test_catalogo_para_la_pregunta_que_variedades_tienes():
+    from src.tools import ver_catalogo
+    resumen = ver_catalogo.invoke({})
+    cats = {c["categoria"]: c for c in resumen["categorias"]}
+    assert {"Rosas", "Rellenos", "Claveles"} <= set(cats)
+    assert "Rosa Freedom roja" in cats["Rosas"]["variedades"]          # los 3 largos se agrupan
+    assert cats["Rosas"]["precio_desde"] == 0.38
+    assert len(ver_catalogo.invoke({"categoria": "rosas"})["flores"]) == 15
+
+
+@pytest.mark.parametrize("texto,esperado", [
+    ("Si me parece", True), ("sí, dale", True), ("Perfecto, esa", True), ("ok", True), ("Claro que si", True),
+    ("¿Cuánto cuesta la rosa?", False), ("No, mejor 100 tallos", False), ("Quiero 500 tallos de Freedom", False),
+])
+def test_confirmacion(texto, esperado):
+    assert es_confirmacion(texto) is esperado
+
+
+def _correr(llm, mensajes, hilo=None):
+    g = build_graph(llm)
+    conf = {"configurable": {"thread_id": hilo or uuid.uuid4().hex}}
+    cli = ERPClient().get_cliente("C001")
+    for m in mensajes:
+        g.invoke({"messages": [HumanMessage(content=m)], "cliente_canal": cli}, conf)
+    return g, conf
+
+
+def test_aceptar_una_propuesta_arma_el_pedido_sin_volver_a_preguntar():
+    """Falla real: tras proponer 'pedir 75', el cliente dijo 'sí me parece' y el bot se confundió."""
+    llm = ScriptedChatModel(guion=[
+        llamar(tool_call("preparar_borrador_pedido", cliente="C001", items=[{"producto": "Mondial", "cantidad": 60}])),
+        responder("Con bonches de 25 puedo ofrecerle 50 o 75 tallos de Mondial. ¿Cuál prefiere?"),
+        llamar(tool_call("preparar_borrador_pedido", cliente="C001", items=[{"producto": "Mondial", "cantidad": 75}])),
+    ])
+    g, conf = _correr(llm, ["Quiero 60 tallos de Mondial", "La de 75 porfa"])
+    assert pendiente_de_aprobacion(g, conf["configurable"]["thread_id"])["validacion"]["lineas"][0]["cantidad"] == 75
+
+
+def test_si_con_una_sola_opcion_fuerza_el_borrador():
+    vistos = []
+
+    class Espia(ScriptedChatModel):
+        def bind_tools(self, tools, **kw):
+            vistos.append((tuple(t.name for t in tools), kw.get("tool_choice")))
+            return self
+
+        def invoke(self, mensajes, config=None, **kw):
+            vistos.append(("prompt", mensajes[0].content))
+            return super().invoke(mensajes, config=config, **kw)
+
+    llm = Espia(guion=[
+        llamar(tool_call("preparar_borrador_pedido", cliente="C001", items=[{"producto": "Mondial", "cantidad": 3000}])),
+        responder("En CAY hay 8000 tallos de Mondial, caben sus 3000... "),
+    ])
+    # 3000 tallos de Mondial sí hay: provocamos un rechazo de descuento con UNA alternativa
+    llm.guion[0] = llamar(tool_call("preparar_borrador_pedido", cliente="C001",
+                                    items=[{"producto": "Mondial", "cantidad": 6000, "descuento_pct": 30}]))
+    llm.guion[1] = responder("Su descuento máximo es 8%. ¿Le parece bien?")
+    llm.guion.append(llamar(tool_call("preparar_borrador_pedido", cliente="C001",
+                                      items=[{"producto": "Mondial", "cantidad": 6000, "descuento_pct": 8}])))
+    g, conf = _correr(llm, ["Quiero 6000 tallos de Mondial con 30% de descuento", "Si, dale"])
+    assert pendiente_de_aprobacion(g, conf["configurable"]["thread_id"])
+    assert (("preparar_borrador_pedido",), "preparar_borrador_pedido") in vistos
+    assert any(v[0] == "prompt" and "responde a tu propuesta anterior" in v[1] for v in vistos)
+
+
+def test_si_con_varias_opciones_no_fuerza_nada_y_pregunta():
+    class Espia(ScriptedChatModel):
+        forzados: list = []
+
+        def bind_tools(self, tools, **kw):
+            if kw.get("tool_choice"):
+                Espia.forzados.append(kw["tool_choice"])
+            return self
+
+    Espia.forzados = []
+    llm = Espia(guion=[
+        llamar(tool_call("preparar_borrador_pedido", cliente="C001", items=[{"producto": "Mondial", "cantidad": 60}])),
+        responder("Puedo ofrecerle 50 o 75 tallos de Mondial. ¿Cuál prefiere?"),
+        responder("Perfecto, ¿50 o 75 tallos? Dígame cuál."),
+    ])
+    g, conf = _correr(llm, ["Quiero 60 tallos de Mondial", "Si me parece"])
+    # el 'sí' no forzó preparar_borrador_pedido en el segundo mensaje (solo el primero lo forzó por 'quiero')
+    assert Espia.forzados.count("preparar_borrador_pedido") >= 1
+    assert llm.llamadas == 3
+    assert pendiente_de_aprobacion(g, conf["configurable"]["thread_id"]) is None

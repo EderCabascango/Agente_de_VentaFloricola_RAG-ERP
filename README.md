@@ -2,11 +2,11 @@
 
 Prototipo de un agente con **LangChain + LangGraph** que atiende por chat a importadores y floristerías de una florícola exportadora: cotiza rosas y flores de verano, revisa disponibilidad por finca, toma pedidos y responde dudas de envíos, temporadas, reclamos y cuidado de la flor.
 
-El chat de la demo **imita WhatsApp** y el agente ya responde con el formato del canal. La conexión con la API real de WhatsApp es el siguiente paso (ver [Camino a WhatsApp](#camino-a-whatsapp)).
+Se puede mostrar de dos formas: en la **demo de Streamlit**, con un chat que imita WhatsApp, o en **WhatsApp real** con la Cloud API de Meta (ver [Canal WhatsApp](#canal-whatsapp-real)). En los dos casos el ERP es sintético.
 
 **El agente nunca escribe en el ERP por su cuenta.** Todo pedido pasa por un validador determinista (código, no LLM) y por la aprobación de una persona.
 
-![Python](https://img.shields.io/badge/python-3.11-blue) ![LangGraph](https://img.shields.io/badge/LangGraph-agente-green) ![Streamlit](https://img.shields.io/badge/UI-Streamlit-red) ![Tests](https://img.shields.io/badge/tests-71%20passing-brightgreen)
+![Python](https://img.shields.io/badge/python-3.11-blue) ![LangGraph](https://img.shields.io/badge/LangGraph-agente-green) ![Streamlit](https://img.shields.io/badge/UI-Streamlit-red) ![Tests](https://img.shields.io/badge/tests-110%20passing-brightgreen)
 
 > *Rosaflor Andina* es una florícola **ficticia**. Clientes, números de WhatsApp, identificaciones, precios y stock son datos inventados para la demo.
 
@@ -46,7 +46,7 @@ flowchart TD
 | Componente | Archivo | Rol |
 |---|---|---|
 | Grafo del agente | [`src/graph.py`](src/graph.py) | Nodos, aristas, reintentos, respaldo de proveedor, respuesta final |
-| Canal WhatsApp | [`src/whatsapp.py`](src/whatsapp.py) | Formato de WhatsApp, límite de 4.096 caracteres, número → conversación |
+| Canal WhatsApp | [`webhook.py`](webhook.py), [`src/whatsapp_api.py`](src/whatsapp_api.py), [`src/whatsapp.py`](src/whatsapp.py) | Webhook de Meta, envío de mensajes y botones, formato y número → conversación |
 | Validador | [`src/validators.py`](src/validators.py) | Reglas de negocio deterministas y alternativas ya calculadas |
 | Guardrails | [`src/guardrails.py`](src/guardrails.py) | Anti-inyección, fuera de alcance y detección de intención |
 | Herramientas | [`src/tools.py`](src/tools.py) | 6 tools de solo lectura sobre el ERP y las políticas |
@@ -61,7 +61,7 @@ flowchart TD
 | Dato | Valor |
 |---|---|
 | Catálogo | 25 productos: 15 rosas (variedad, color y largo), gypsophila, hypericum, limonium, claveles y flores de verano |
-| Unidad de venta | Tallo, en **bonches de 25**. Precios FOB Quito en USD por tallo |
+| Unidad de venta | Tallo, en **bonches de 25**; **caja completa = 400 tallos**. El cliente puede pedir en tallos, bonches o cajas y el código convierte. Precios FOB Quito en USD por tallo |
 | Fincas con cuarto frío | CAY (Cayambe), TAB (Tabacundo), LAT (Latacunga) |
 | Clientes | 6 importadores y floristerías de EE. UU., Francia, Países Bajos, Rusia y Ecuador, cada uno con su número de WhatsApp |
 | Descuento por volumen | 0% hasta 999 tallos · 5% desde 1.000 · 8% desde 5.000 · 12% desde 10.000, con tope por cliente |
@@ -99,24 +99,30 @@ En la barra lateral eliges **qué cliente escribe** (su número de WhatsApp lo i
 | 4 | Cuidado de la flor | Respuesta solo con la guía de postcosecha (RAG), con cita |
 | 5 | Pregunta sin datos (precio de San Valentín del próximo año) | Dice "no sé" y escala a un asesor |
 | 6 | Intento de inyección | Bloqueo por reglas: 0 tokens, 0 s, queda en la auditoría |
+| 7 | Variedades ("¿qué tienen?") | Muestra el catálogo por categorías con precios y pregunta qué le interesa |
+| 8 | Pedido en cajas | El código convierte 5 cajas a 2.000 tallos, valida y queda pendiente de aprobación |
 
 Guion completo en [`demo_script.md`](demo_script.md).
 
-## Camino a WhatsApp
+## Canal WhatsApp (real)
 
-La demo deja listo todo lo que no depende de Meta:
+Además de la demo en Streamlit, el agente atiende **WhatsApp de verdad** con la Cloud API de Meta. El ERP sigue siendo sintético. Guía paso a paso (cuenta de Meta, número propio, token, ngrok y webhook): [`docs/whatsapp_produccion.md`](docs/whatsapp_produccion.md).
 
-- **Identificación del cliente por su número.** `ERPClient.get_cliente("+1 305 555 0142")` devuelve el cliente, y el grafo recibe ese cliente en `cliente_canal`: el LLM no tiene que preguntar quién es.
-- **Una conversación por número.** `hilo_de(numero)` da el `thread_id` de LangGraph, así cada cliente tiene su propia memoria.
-- **Formato del canal.** `respuesta_final["respuesta_whatsapp"]` trae el texto listo para enviar: `*negrita*`, viñetas, sin tablas ni títulos y dentro del límite de 4.096 caracteres.
+```bash
+python -m uvicorn webhook:crear_app --factory --host 127.0.0.1 --port 8000
+```
 
-Para conectarlo de verdad faltan estos pasos:
+| Pieza | Archivo | Qué hace |
+|---|---|---|
+| Webhook | [`webhook.py`](webhook.py) | Verificación de Meta, firma `X-Hub-Signature-256`, responde 200 de inmediato y procesa en segundo plano, ignora mensajes repetidos |
+| Cliente de la API | [`src/whatsapp_api.py`](src/whatsapp_api.py) | Envía texto y botones, marca como leído, lee el JSON del webhook |
+| Formato | [`src/whatsapp.py`](src/whatsapp.py) | Markdown → formato WhatsApp, número → conversación |
+| Memoria | `conversaciones.db` | Checkpointer SQLite: las conversaciones y los pedidos pendientes sobreviven a reinicios |
 
-1. Una cuenta de **WhatsApp Business Platform (Cloud API)** de Meta, con número verificado y plantillas aprobadas para mensajes fuera de la ventana de 24 horas.
-2. Un **webhook** (por ejemplo FastAPI) que reciba el mensaje, valide la firma `X-Hub-Signature-256`, llame a `graph.invoke({"messages": [...], "cliente_canal": cliente}, {"configurable": {"thread_id": hilo_de(numero)}})` y responda con `POST /{phone-number-id}/messages`.
-3. La **aprobación del supervisor** pasa a un panel interno (o a un mensaje de WhatsApp al supervisor). El `interrupt()` de LangGraph ya deja el pedido en espera hasta esa decisión.
-4. Un **checkpointer persistente** (Postgres) en lugar de `MemorySaver`, porque el webhook y el cliente no comparten sesión.
-5. Responder **dentro de los 5 segundos** que espera Meta: el webhook encola el mensaje y lo procesa en segundo plano.
+- **El número identifica al cliente:** el webhook busca el número en el ERP (o en `WHATSAPP_CLIENTES` para los testers del piloto) y el LLM recibe el ID del cliente sin preguntarlo.
+- **Aprobación por WhatsApp:** cuando el validador aprueba un borrador, el supervisor recibe el resumen con botones **Aprobar / Rechazar**. Solo los números de `WHATSAPP_SUPERVISORES` pueden decidir, y un botón tocado dos veces no duplica el pedido.
+- **Reiniciar una prueba:** el supervisor escribe `/reiniciar` y se borra su conversación (y un pedido pendiente) para empezar de cero.
+- **Mismo ERP que la demo:** los pedidos que entran por WhatsApp aparecen en el panel ERP de Streamlit.
 
 ## Proveedores de LLM
 
@@ -157,7 +163,8 @@ Para conectarlo de verdad faltan estos pasos:
 - **El aprobador no se autentica:** su nombre es un campo de texto. En producción iría con un inicio de sesión y roles.
 - **Cualquiera que conozca un número podría hacerse pasar por ese cliente** si el canal no fuera WhatsApp: en producción el número lo garantiza Meta (`wa_id`), no el texto del mensaje.
 - **La auditoría guarda el texto de los mensajes:** en producción habría que definir la retención y el enmascarado de datos personales.
-- **El estado de las conversaciones vive en memoria** (`MemorySaver`): se pierde al reiniciar la app.
+- **En la demo de Streamlit las conversaciones viven en memoria** (`MemorySaver`) y se pierden al reiniciar. El webhook de WhatsApp sí las guarda en SQLite.
+- **El webhook corre en una sola laptop:** si se apaga, WhatsApp no responde. Para atender 24/7 va en un servidor.
 - **Las temporadas no cambian precios en el validador:** la política dice que en San Valentín no aplican descuentos por volumen, pero el prototipo no tiene calendario de temporadas.
 
 ## Costos
@@ -174,7 +181,7 @@ Tokens medidos en 2 pasadas completas con Groq, valorizados con los precios de A
 | Inyección | 0 | 0 | 0 | 0,0 s | 0 | 0 |
 | **Promedio (1–5)** | | | | | **0,00039** | **0,0065** |
 
-**Proyección para 2.000 chats al mes:** ≈ $0,78 con gpt-4o-mini y ≈ $13 con GPT-4o. No incluye infraestructura ni las tarifas de la API de WhatsApp, que Meta cobra por conversación.
+**Proyección para 2.000 chats al mes:** ≈ $0,78 con gpt-4o-mini y ≈ $13 con GPT-4o. No incluye infraestructura ni las plantillas de WhatsApp, que Meta cobra por mensaje (responder a mensajes del cliente dentro de 24 horas no tiene costo).
 
 ## Tests y evidencia
 
@@ -182,25 +189,28 @@ Tokens medidos en 2 pasadas completas con Groq, valorizados con los precios de A
 pytest -q
 ```
 
-71 tests: validador (incluidos los bonches de 25), guardrails, grounding, formato de WhatsApp, los escenarios de punta a punta (aprobar, rechazar y editar), solo lectura, límite de iteraciones, reintentos y respaldo. El LLM simulado (`tests/mock_llm.py`) existe **solo para los tests**; la app siempre usa un LLM real.
+110 tests: validador (bonches de 25, cajas, producto ambiguo), guardrails, grounding, formato de WhatsApp, webhook (firma, reintentos de Meta, aprobación con botones), los escenarios de punta a punta (aprobar, rechazar y editar), solo lectura, límite de iteraciones, reintentos y respaldo. El LLM simulado (`tests/mock_llm.py`) existe **solo para los tests**; la app siempre usa un LLM real.
 
-Para correr los 6 escenarios con el LLM real y calificarlos automáticamente:
+Para correr los 8 escenarios con el LLM real y calificarlos automáticamente:
 
 ```bash
 python scripts/run_scenarios.py --sin-respaldo --pasadas 2
 ```
 
-El resultado queda en `evidencia/`. La última corrida: 2 pasadas seguidas con los 6 escenarios limpios, de 0,5 a 3,7 s por escenario.
+El resultado queda en `evidencia/`. La última corrida: 2 pasadas seguidas con los 8 escenarios limpios.
 
 ## Estructura
 
 ```
 app.py                    UI Streamlit (chat estilo WhatsApp)
 seed.py                   Regenera erp.db (25 productos, 3 fincas, 6 clientes)
-demo.bat                  Arranque con doble clic en Windows
+webhook.py                Webhook de la WhatsApp Cloud API (canal real)
+demo.bat                  Arranque de la demo con doble clic en Windows
+whatsapp.bat              Arranque del webhook de WhatsApp
+docs/whatsapp_produccion.md  Guía para conectar el número en Meta
 src/                      Agente: grafo, canal WhatsApp, validador, guardrails, tools, RAG, grounding, costos, config
 data/policies/            Políticas y guías de la florícola en markdown (fuente del RAG)
-scripts/run_scenarios.py  Corre los 6 escenarios y guarda la evidencia
+scripts/run_scenarios.py  Corre los 8 escenarios y guarda la evidencia
 tests/                    pytest + LLM simulado
 evidencia/                Resultados de las corridas de punta a punta
 DECISIONES.md             Decisiones de ingeniería y fallas corregidas
@@ -209,10 +219,11 @@ demo_script.md            Guion de la demo (5 minutos)
 
 ## Camino a producción
 
-- Canal: WhatsApp Cloud API con webhook (ver arriba).
+- Servidor 24/7 para el webhook (contenedor en la nube) en lugar de laptop + ngrok.
+- Plantilla aprobada por Meta para avisar al supervisor fuera de la ventana de 24 horas.
 - `LLM_PROVIDER=azure` (Azure OpenAI gpt-4o-mini).
 - Reemplazar `erp_client.py` por la API del ERP de la florícola, con un usuario técnico de solo lectura; la escritura, con un usuario distinto y solo desde `escribir_erp`.
-- Checkpointer en Postgres en vez de memoria.
+- Checkpointer en Postgres en vez de SQLite.
 - Aprobadores autenticados y con roles.
 - Calendario de temporadas en el validador (San Valentín, Día de la Madre).
 - Filtro de contenido (por ejemplo Azure AI Content Safety) delante del modelo.

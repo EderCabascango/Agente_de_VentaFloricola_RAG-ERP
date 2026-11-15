@@ -7,6 +7,8 @@
 # Datos generados
 erp.db
 erp.db-journal
+*.db-shm
+*.db-wal
 *.db
 .chroma/
 .cache/

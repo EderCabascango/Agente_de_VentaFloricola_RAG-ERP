@@ -30,3 +30,8 @@ def test_cliente_se_identifica_por_whatsapp():
     erp = ERPClient()
     assert erp.get_cliente("+33 6 55 50 01 23")["id"] == "C002"
     assert erp.get_cliente("+00 000 000 0000") is None
+
+
+def test_negrita_anidada_se_aplana_y_las_separadas_se_respetan():
+    assert formatear_para_whatsapp("*El descuento es del **8 %**.*") == "*El descuento es del 8 %.*"
+    assert formatear_para_whatsapp("*Total:* $2,300 y *plazo:* 48 a 72 horas") == "*Total:* $2,300 y *plazo:* 48 a 72 horas"

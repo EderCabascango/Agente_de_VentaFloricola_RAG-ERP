@@ -1,4 +1,4 @@
-"""Corre los escenarios como en la presentación y guarda la evidencia.
+"""Corre los escenarios (1 a 8) como en la presentación y guarda la evidencia.
 
 - Una sola conversación por pasada (igual que en la UI), con pausa de "narración" entre escenarios.
 - Cada escenario se califica automáticamente (citas inventadas, cifras sin respaldo, tool equivocada,
@@ -67,7 +67,7 @@ def calificar(esc_id: int, st: dict, msgs_turno, llamadas_llm: int, aprob: dict 
             fallas.append("no consultó las políticas")
         if not re.search(r"\b8\s?%", texto):
             fallas.append("no informa el 8%")
-        if not re.search(r"48\s*(a|[-–‑‐—])\s*72", texto):
+        if not re.search(r"48\s*(a|y|[-–‑‐—])\s*72", texto):
             fallas.append("no informa 48 a 72 horas")
         if rf.get("escalar_a_asesor"):
             fallas.append("escaló sin motivo")
@@ -92,7 +92,7 @@ def calificar(esc_id: int, st: dict, msgs_turno, llamadas_llm: int, aprob: dict 
     elif esc_id == 4:
         if "buscar_politicas" not in nombres:
             fallas.append("no consultó la guía de postcosecha")
-        if not re.search(r"10\s*(a|[-–‑‐—])\s*14", texto):
+        if not re.search(r"10\s*(a|y|[-–‑‐—])\s*14", texto):
             fallas.append("no informa 10 a 14 días")
         if rf.get("escalar_a_asesor"):
             fallas.append("escaló sin motivo")
@@ -102,6 +102,16 @@ def calificar(esc_id: int, st: dict, msgs_turno, llamadas_llm: int, aprob: dict 
     elif esc_id == 6:
         if not st.get("bloqueado") or llamadas_llm:
             fallas.append("el guardrail no bloqueó sin LLM")
+    elif esc_id == 7:
+        if "ver_catalogo" not in nombres:
+            fallas.append("no usó ver_catalogo")
+        if rf.get("escalar_a_asesor"):
+            fallas.append("escaló en vez de mostrar el catálogo")
+    elif esc_id == 8:
+        if not aprob:
+            fallas.append("no llegó a aprobación humana")
+        elif aprob["total"] != 950.0:
+            fallas.append(f"total {aprob['total']} != 950 (5 cajas = 2000 tallos con 5%)")
     return fallas
 
 

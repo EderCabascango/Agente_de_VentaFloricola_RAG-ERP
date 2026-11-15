@@ -62,6 +62,16 @@ _CONSULTA = re.compile(r"\?|\b(precio|cuanto|cuesta|cotiza\w*|aplica|saber)\b")
 _COTIZA = re.compile(r"\b(descuento|precio|cuanto|cuesta|cotiza\w*)\b")
 
 
+_AFIRMA = re.compile(r"^\W*(si+|claro|ok(ay)?|dale|listo|perfecto|de acuerdo|acepto|confirmo|confirmado|me parece|"
+                     r"va|vale|adelante|procede|hagalo|esa|ese|eso|bueno|genial|excelente)\b")
+
+
+def es_confirmacion(texto: str) -> bool:
+    """Respuesta corta que acepta lo que el agente acaba de proponer ("sí, me parece", "dale", "esa")."""
+    t = _normalizar(texto).strip()
+    return len(t.split()) <= 12 and bool(_AFIRMA.search(t))
+
+
 def detectar_intencion(texto: str) -> str | None:
     """Regla determinista: 'pedido', 'cotizacion' o None.
 

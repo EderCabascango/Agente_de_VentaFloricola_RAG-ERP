@@ -17,6 +17,8 @@ import re
 LIMITE_WHATSAPP = 4096  # caracteres por mensaje de texto en la API de WhatsApp
 
 _NEGRITA_MD = re.compile(r"\*\*(.+?)\*\*|__(.+?)__", re.DOTALL)
+# un * precedido de espacio abre; si aparece dentro de otra negrita, es una negrita anidada
+_NEGRITA_ANIDADA = re.compile(r"\*([^*\s][^*\n]*\s)\*([^*\n]+?)\*([^*\s][^*\n]*)?\*")
 _TITULO_MD = re.compile(r"(?m)^\s{0,3}#{1,6}\s*(.+?)\s*#*\s*$")
 _LINK_MD = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
 _VINETA = re.compile(r"(?m)^\s*[-*•]\s+")
@@ -32,6 +34,10 @@ def formatear_para_whatsapp(texto: str) -> str:
     t = _FILA_TABLA.sub(lambda m: " · ".join(c.strip() for c in m.group(1).split("|") if c.strip()), t)
     t = _TITULO_MD.sub(lambda m: f"*{m.group(1)}*", t)
     t = _NEGRITA_MD.sub(lambda m: f"*{m.group(1) or m.group(2)}*", t)
+    # Negrita dentro de negrita ("*Total del *8 %*.*"): WhatsApp la muestra rota, se deja solo la exterior.
+    previo = None
+    while previo != t:
+        previo, t = t, _NEGRITA_ANIDADA.sub(lambda m: f"*{m.group(1)}{m.group(2)}{m.group(3) or ''}*", t)
     t = _LINK_MD.sub(lambda m: f"{m.group(1)}: {m.group(2)}", t)
     t = _VINETA.sub("• ", t)
     t = _LINEAS_VACIAS.sub("\n\n", t)

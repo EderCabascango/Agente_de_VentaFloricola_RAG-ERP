@@ -13,9 +13,16 @@ from typing import Optional
 from langchain_core.tools import tool
 
 from .erp_client import ERPClient
-from .validators import BorradorPedido, ItemBorrador, descuento_por_volumen
+from .validators import BorradorPedido, ItemBorrador, a_tallos, descuento_por_volumen
 
 _erp = ERPClient()
+
+
+def _ambiguo(texto: str, opciones: list[dict]) -> dict:
+    """El código no elige por el cliente: devuelve las opciones para que el agente le pregunte."""
+    return {"error": f"'{texto}' puede ser varias flores; pregunte al cliente cuál prefiere.",
+            "opciones": [{"nombre": o["nombre"], "sku": o["sku"], "precio_por_tallo": o["precio_unitario"]}
+                         for o in opciones]}
 
 
 @tool
@@ -24,6 +31,12 @@ def buscar_politicas(pregunta: str) -> dict:
     from .rag import buscar
 
     return {"fragmentos": buscar(pregunta, k=2)}
+
+
+@tool
+def ver_catalogo(categoria: Optional[str] = None) -> dict:
+    """Catálogo de flores. Sin categoría: resumen de categorías, variedades y rango de precios por tallo. Con categoría (Rosas, Rellenos, Claveles, Flores de verano): sus flores con precio."""
+    return _erp.catalogo_resumen(categoria)
 
 
 @tool
@@ -36,7 +49,9 @@ def buscar_producto(texto: str) -> dict:
 @tool
 def consultar_inventario(producto: str) -> dict:
     """Tallos disponibles por finca (CAY Cayambe, TAB Tabacundo, LAT Latacunga). Acepta SKU o nombre."""
-    prod = _erp.resolver_producto(producto)
+    prod, opciones = _erp.resolver_estricto(producto)
+    if opciones:
+        return _ambiguo(producto, opciones)
     if not prod:
         return {"error": f"Producto '{producto}' no existe."}
     stock = {s["bodega"]: s["stock_disponible"] for s in _erp.inventario(prod["sku"])}
@@ -54,11 +69,19 @@ def consultar_cliente(id_o_ruc: str) -> dict:
 
 
 @tool
-def calcular_cotizacion(producto: str, cantidad: int, cliente: Optional[str] = None) -> dict:
-    """Precio ERP por tallo, descuento aplicable y total. cantidad = tallos. Acepta SKU o nombre; cliente = ID o identificación."""
-    prod = _erp.resolver_producto(producto)
+def calcular_cotizacion(producto: str, cantidad: int, cliente: Optional[str] = None,
+                        unidad: Optional[str] = None) -> dict:
+    """Precio ERP por tallo, descuento aplicable y total. cantidad en la unidad del cliente (tallos por defecto, bonches o cajas). Acepta SKU o nombre; cliente = ID o identificación."""
+    prod, opciones = _erp.resolver_estricto(producto)
+    if opciones:
+        return _ambiguo(producto, opciones)
     if not prod:
         return {"error": f"Producto '{producto}' no existe."}
+    pedido = f"{cantidad} {unidad}" if unidad else None
+    cantidad, factor = a_tallos(cantidad, unidad)
+    if factor is None:
+        return {"error": f"Unidad '{unidad}' no reconocida: use tallos, bonches o cajas."}
+    cantidad = int(cantidad)
     pct_vol = descuento_por_volumen(cantidad)
     pct, tope = pct_vol, None
     if cliente:
@@ -70,6 +93,8 @@ def calcular_cotizacion(producto: str, cantidad: int, cliente: Optional[str] = N
     desc = round(bruto * pct / 100, 2)
     res = {"sku": prod["sku"], "nombre": prod["nombre"], "cantidad": cantidad, "unidad": prod["unidad"],
            "precio_unitario": prod["precio_unitario"], "descuento_volumen_pct": pct_vol}
+    if factor > 1:
+        res["equivale"] = f"{pedido} = {cantidad} tallos"
     if tope is not None:
         res["descuento_max_cliente_pct"] = tope
     res.update({"descuento_aplicable_pct": pct, "subtotal": bruto, "descuento_usd": desc,
@@ -85,5 +110,5 @@ def preparar_borrador_pedido(cliente: str, items: list[ItemBorrador], destino: O
 
 
 TOOLS = [buscar_politicas, calcular_cotizacion, preparar_borrador_pedido, consultar_inventario,
-         consultar_cliente, buscar_producto]
+         consultar_cliente, buscar_producto, ver_catalogo]
 TOOLS_BY_NAME = {t.name: t for t in TOOLS}

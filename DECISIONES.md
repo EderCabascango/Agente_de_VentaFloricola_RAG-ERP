@@ -35,6 +35,19 @@ Casi todas siguen un mismo principio:
 | 9 | El calificador automático marcó como error "10‑14 días" porque gpt-oss usa un guion no separable (U+2011). | Revisión de la evidencia. | El calificador acepta cualquier guion Unicode. Es el mismo problema que ya se había resuelto para los SKU ("ROS‑001"). |
 | 10 | La validación decía "$0.50 por tallos". | Prueba visual de la UI. | El texto usa "por tallo". |
 
+## Mejoras de venta tras la primera conversación real por WhatsApp
+
+La primera prueba con un cliente real (el piloto) mostró cuatro fallas que ninguna prueba automática había visto, porque los tests usaban pedidos "limpios":
+
+| # | Falla observada en WhatsApp | Corrección |
+|---|---|---|
+| 11 | **"¿Qué variedades tienes?"** → "la derivo a un asesor". No existía una herramienta de catálogo. | Herramienta `ver_catalogo`: resumen por categoría (variedades y rango de precios) y detalle por categoría. El prompt manda ofrecerlo y preguntar qué le interesa. |
+| 12 | **"Quiero 60 cajas de Mondial"** se tomó como 60 *tallos* y el pedido se rechazó por no completar bonches. | Los ítems llevan `unidad` (tallos, bonches o cajas). **El código convierte** (bonche = 25 tallos, caja = 400) y deja el equivalente en la validación ("60 cajas = 24000 tallos"). El LLM no convierte. |
+| 13 | **"Sí, me parece"** → el bot olvidó su propia propuesta y escaló a un asesor (el verificador rechazó las cifras que intentó recalcular). | El validador guarda la última propuesta (`oferta`). Una regla detecta que el cliente la acepta o elige ("sí", "dale", "la de 75"): con una sola opción fuerza el borrador; con varias, el agente pregunta cuál. |
+| 14 | **"Freedom"** existe en 50, 60 y 70 cm y el código elegía una en silencio. | `resolver_estricto`: si hay más de una coincidencia, el validador rechaza con las opciones y precios, y el agente pregunta cuál. Nunca elige por el cliente. |
+
+Detalles que salieron al probarlo: la coincidencia de nombres solo acepta plurales ("rosas"/"rosa"), porque "freedom" empezaba con "free" y también agarraba "Free Spirit". El calificador automático aceptaba "48 a 72" pero no "48 y 72", y marcaba como error una respuesta correcta.
+
 ## Decisiones heredadas del agente base
 
 ### Precisión: el agente no puede inventar

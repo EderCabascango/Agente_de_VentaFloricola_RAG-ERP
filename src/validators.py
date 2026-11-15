@@ -25,6 +25,17 @@ POLITICA_DESCUENTO_VOLUMEN = [  # (tallos mínimos por línea, % descuento)
 ]
 
 TALLOS_POR_BONCHE = 25
+TALLOS_POR_CAJA = 400  # caja completa = 16 bonches de 25 tallos (ver data/policies/presentaciones.md)
+# Quien compra flor habla en cajas, bonches o tallos: el código convierte, el LLM no hace cuentas.
+TALLOS_POR_UNIDAD = {"tallo": 1, "tallos": 1, "bonche": TALLOS_POR_BONCHE, "bonches": TALLOS_POR_BONCHE,
+                     "ramo": TALLOS_POR_BONCHE, "ramos": TALLOS_POR_BONCHE,
+                     "caja": TALLOS_POR_CAJA, "cajas": TALLOS_POR_CAJA}
+
+
+def a_tallos(cantidad: float, unidad: Optional[str]) -> tuple[float, Optional[int]]:
+    """(cantidad en tallos, tallos por unidad). El segundo valor es None si la unidad no se reconoce."""
+    factor = TALLOS_POR_UNIDAD.get(_normalizar(unidad or "tallos").strip())
+    return (cantidad * factor if factor else cantidad), factor
 
 # Fincas con cuarto frío. Si el cliente no pide una, se despacha desde Cayambe.
 FINCA_POR_NOMBRE = {"cayambe": "CAY", "tabacundo": "TAB", "latacunga": "LAT"}
@@ -44,7 +55,8 @@ class ItemBorrador(BaseModel):
     # El LLM ve este campo como "producto": llamarlo "sku" lo invitaba a inventar códigos (p. ej. "VAR-012").
     model_config = ConfigDict(populate_by_name=True)
     sku: str = Field(alias="producto", description="Flor tal como la nombró el cliente (variedad, color, largo)")
-    cantidad: float = Field(description="Tallos")
+    cantidad: float = Field(description="Cantidad en la unidad que dijo el cliente")
+    unidad: Optional[str] = Field(None, description="tallos (por defecto), bonches o cajas: la que dijo el cliente")
     descuento_pct: Optional[float] = Field(None, description="% pedido por el cliente")
     precio_unitario: Optional[float] = None
     bodega: Optional[str] = Field(None, description="Finca, solo si el cliente la pidió")
@@ -129,7 +141,13 @@ def validar_borrador(borrador: dict, erp: ERPClient | None = None) -> ResultadoV
     lineas: list[LineaValidada] = []
     total_solicitado = 0.0
     for it in b.items:
-        prod = erp.resolver_producto(it.sku)
+        prod, opciones = erp.resolver_estricto(it.sku)
+        if opciones:
+            lista = "; ".join(f"{o['nombre']} (${o['precio_unitario']:.2f} por tallo)" for o in opciones)
+            checks.append(Check(nombre="producto_ambiguo", ok=False, sku=it.sku,
+                                detalle=f"'{it.sku}' puede ser varias flores: {lista}. Falta que el cliente elija una."))
+            alternativas.append(f"Preguntar al cliente cuál de estas flores quiere: {lista}.")
+            continue
         if not prod:
             checks.append(Check(nombre="sku_existe", ok=False, sku=it.sku, detalle=f"Producto '{it.sku}' no existe en el ERP."))
             continue
@@ -138,12 +156,21 @@ def validar_borrador(borrador: dict, erp: ERPClient | None = None) -> ResultadoV
         sku = prod["sku"]
 
         # Cantidad
+        tallos, factor = a_tallos(it.cantidad, it.unidad)
+        if factor is None:
+            checks.append(Check(nombre="cantidad_valida", ok=False, sku=sku,
+                                detalle=f"Unidad '{it.unidad}' no reconocida: use tallos, bonches o cajas."))
+            continue
         cant_ok = it.cantidad > 0 and float(it.cantidad).is_integer()
-        checks.append(Check(
-            nombre="cantidad_valida", ok=cant_ok, sku=sku,
-            detalle=f"{it.cantidad:g} {prod['unidad']}" if cant_ok else f"Cantidad inválida: {it.cantidad:g} (debe ser entera y > 0)",
-        ))
-        cantidad = int(it.cantidad) if cant_ok else 0
+        unidad_txt = _normalizar(it.unidad or "tallos").strip()
+        if cant_ok and factor > 1:
+            detalle_cant = f"{it.cantidad:g} {unidad_txt} = {int(tallos)} tallos"
+        elif cant_ok:
+            detalle_cant = f"{int(tallos)} tallos"
+        else:
+            detalle_cant = f"Cantidad inválida: {it.cantidad:g} (debe ser entera y > 0)"
+        checks.append(Check(nombre="cantidad_valida", ok=cant_ok, sku=sku, detalle=detalle_cant))
+        cantidad = int(tallos) if cant_ok else 0
 
         # Bonches completos: la flor se arma y se vende en bonches de 25 tallos
         if cant_ok:
@@ -161,7 +188,7 @@ def validar_borrador(borrador: dict, erp: ERPClient | None = None) -> ResultadoV
 
         # Stock por finca
         stock = erp.inventario(sku)
-        bodega = _elegir_bodega(stock, it.bodega, it.cantidad)
+        bodega = _elegir_bodega(stock, it.bodega, cantidad)
         disp = next((s["stock_disponible"] for s in stock if s["bodega"] == bodega), 0)
         stock_ok = cant_ok and cantidad <= disp
         resto = [s for s in stock if s["bodega"] != bodega]
@@ -171,7 +198,7 @@ def validar_borrador(borrador: dict, erp: ERPClient | None = None) -> ResultadoV
         checks.append(Check(
             nombre="stock_suficiente", ok=stock_ok, sku=sku,
             detalle=(f"Finca {bodega}: {disp} tallos disponibles" if stock_ok
-                     else f"Stock insuficiente en finca {bodega}: pide {it.cantidad:g}, hay {disp}. Otras fincas: {otras}"),
+                     else f"Stock insuficiente en finca {bodega}: pide {cantidad} tallos, hay {disp}. Otras fincas: {otras}"),
         ))
         if cant_ok and not stock_ok:
             total_disp = sum(s["stock_disponible"] for s in stock)
@@ -229,7 +256,7 @@ def validar_borrador(borrador: dict, erp: ERPClient | None = None) -> ResultadoV
         subtotal = round(cantidad * precio * (1 - aplicado / 100), 2)
         # Lo que el cliente pidió (cantidad y descuento solicitados), para el chequeo de crédito
         desc_pedido = float(it.descuento_pct) if it.descuento_pct else aplicado
-        total_solicitado += max(it.cantidad, 0) * precio * (1 - desc_pedido / 100)
+        total_solicitado += cantidad * precio * (1 - desc_pedido / 100)
         lineas.append(LineaValidada(solicitado=it.sku, sku=sku, nombre=prod["nombre"], unidad=prod["unidad"], cantidad=cantidad,
                                     bodega=bodega, precio_unitario=precio, descuento_pct=aplicado, subtotal=subtotal))
 

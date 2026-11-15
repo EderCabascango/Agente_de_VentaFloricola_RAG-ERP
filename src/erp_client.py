@@ -88,6 +88,57 @@ class ERPClient:
         res = self.buscar_productos(sku_o_nombre, limite=1)
         return res[0] if res else None
 
+    def resolver_estricto(self, texto: str) -> tuple[dict | None, list[dict]]:
+        """Como `resolver_producto`, pero NUNCA elige por el cliente cuando hay varias flores posibles.
+
+        Devuelve (producto, []) si hay una sola coincidencia, o (None, opciones) si el texto es ambiguo
+        (p. ej. "Freedom" existe en 3 largos). El código decide; el LLM solo pregunta cuál prefiere.
+        """
+        prod = self.get_producto(texto)
+        if prod:
+            return prod, []
+        nq = _normalizar(texto).strip()
+        tokens = [t for t in nq.replace(",", " ").split() if t not in _STOPWORDS]
+        if not tokens:
+            return None, []
+        todos = self.listar_productos()
+        for p in todos:
+            if _normalizar(p["nombre"]) == nq:
+                return p, []
+        cands = []
+        for p in todos:
+            palabras = _normalizar(f"{p['sku']} {p['nombre']} {p['categoria']}").split()
+            # t empieza con w solo si es plural (rosas/rosa, claveles/clavel): 'freedom' no debe coincidir con 'free'
+            if all(any(w.startswith(t) or (t.startswith(w) and len(w) > 3 and len(t) - len(w) <= 2) for w in palabras)
+                   for t in tokens):
+                cands.append(p)
+        if len(cands) == 1:
+            return cands[0], []
+        if len(cands) > 1:
+            return None, cands[:8]
+        res = self.buscar_productos(texto, limite=1)
+        return (res[0], []) if res else (None, [])
+
+    def catalogo_resumen(self, categoria: str | None = None) -> dict:
+        """Catálogo compacto: sin categoría, un resumen por categoría; con categoría, sus flores con precio."""
+        import re as _re
+        todos = self.listar_productos()
+        if categoria:
+            nc = _normalizar(categoria).strip()
+            sel = [p for p in todos if nc and (nc in _normalizar(p["categoria"]) or _normalizar(p["categoria"]) in nc)]
+            return {"categoria": sel[0]["categoria"] if sel else categoria,
+                    "flores": [f"{p['nombre']} · ${p['precio_unitario']:.2f} por tallo" for p in sel]}
+        grupos: dict[str, list[dict]] = {}
+        for p in todos:
+            grupos.setdefault(p["categoria"], []).append(p)
+        out = []
+        for cat, ps in grupos.items():
+            nombres = list(dict.fromkeys(_re.sub(r"\s+\d+\s*cm$", "", p["nombre"]) for p in ps))
+            precios = [p["precio_unitario"] for p in ps]
+            out.append({"categoria": cat, "variedades": nombres,
+                        "precio_desde": min(precios), "precio_hasta": max(precios)})
+        return {"categorias": out}
+
     # -- inventario ----------------------------------------------------------------
     def inventario(self, sku: str) -> list[dict]:
         return self._all(

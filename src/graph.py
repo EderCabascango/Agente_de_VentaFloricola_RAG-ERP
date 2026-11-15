@@ -24,18 +24,20 @@ from pydantic import BaseModel
 from . import config as cfg
 from .erp_client import ErrorEscrituraERP, registrar_auditoria, registrar_pedido_aprobado
 from .grounding import verificar_citas, verificar_grounding
-from .guardrails import detectar_intencion, revisar_entrada
+from .guardrails import detectar_intencion, es_confirmacion, revisar_entrada
 from .tools import TOOLS, TOOLS_BY_NAME
 from .validators import validar_borrador
 from .whatsapp import formatear_para_whatsapp
 
-SYSTEM_PROMPT = """Asistente de ventas por WhatsApp de Rosaflor Andina, florícola exportadora de Cayambe (Ecuador). Atiendes a importadores y floristerías. Las cantidades son en tallos; se venden en bonches de 25. Reglas:
+SYSTEM_PROMPT = """Asistente de ventas por WhatsApp de Rosaflor Andina, florícola exportadora de Cayambe (Ecuador). Atiendes a importadores y floristerías. Se vende por tallo, en bonches de 25 tallos; una caja completa son 400 tallos. Reglas:
 1. Usa solo datos de herramientas. Toda cifra que escribas debe aparecer tal cual en un resultado de herramienta. No calcules ni muestres operaciones: usa calcular_cotizacion.
 2. Si no hay dato (p. ej. precios futuros o de temporada), responde solo: "No tengo esa información, la derivo a un asesor."
 3. Políticas, envíos, reclamos y cuidado de la flor: buscar_politicas. Cita solo archivos que devolvió, ej. [tiempos_envio.md].
-4. Solo si el cliente pide comprar o hacer un pedido, llama de inmediato a preparar_borrador_pedido con exactamente lo que pidió el cliente (tallos, descuento; flor por nombre o SKU). No revises stock, bonches, crédito ni descuento: lo hace el validador. Nunca registras en el ERP. Una consulta de precio o descuento NO es un pedido: usa calcular_cotizacion (aplica la política y el tope del cliente).
+4. Solo si el cliente pide comprar o hacer un pedido, llama de inmediato a preparar_borrador_pedido con exactamente lo que pidió: cada línea con su cantidad y su unidad tal como la dijo (tallos, bonches o cajas; no conviertas, el sistema convierte), descuento y flor por nombre o SKU. No revises stock, bonches, crédito ni descuento: lo hace el validador. Nunca registras en el ERP. Una consulta de precio o descuento NO es un pedido: usa calcular_cotizacion (aplica la política y el tope del cliente).
 5. Si el validador rechaza: explica sus motivos y ofrece sus alternativas con sus cifras exactas, sin calcular otras; pide confirmación.
-6. Llama en paralelo las herramientas independientes. Español, tono cordial de WhatsApp, máximo 90 palabras, sin tablas ni títulos; *negrita* con un asterisco. Precios en USD FOB Quito."""
+6. Si piden ver variedades o catálogo, usa ver_catalogo y ofrece las categorías con su rango de precios; luego pregunta qué le interesa. Si una flor puede ser varias (largos o colores), pregunta cuál antes de cotizar.
+7. Termina con una pregunta corta que avance la venta (cantidad, largo o destino).
+8. Llama en paralelo las herramientas independientes. Español, tono cordial de WhatsApp, máximo 90 palabras, sin tablas ni títulos; *negrita* con un asterisco, solo en cifras clave (nunca un mensaje entero). Precios en USD FOB Quito."""
 
 TOOL_FORZADA = {"pedido": "preparar_borrador_pedido", "cotizacion": "calcular_cotizacion"}
 
@@ -48,6 +50,8 @@ USUARIO_SISTEMA = "agente-ia"
 class AgentState(TypedDict, total=False):
     messages: Annotated[list[BaseMessage], add_messages]
     cliente_canal: Optional[dict]   # cliente identificado por su número de WhatsApp (lo pone el canal, no el LLM)
+    oferta: Optional[dict]          # última propuesta rechazada por el validador (el cliente puede aceptarla: "sí, dale")
+    acepta_oferta: bool
     turno: int
     iteraciones: int
     borrador: Optional[dict]
@@ -270,11 +274,20 @@ def build_graph(llm=None, checkpointer=None, respaldo=None):
                  "borrador_nuevo": False, "validacion": None, "intentos_validacion": 0,
                  "reintentos_grounding": 0, "decision": None, "pedido_creado": None, "escalar": False,
                  "motivo_escalar": "", "bloqueado": False, "grounding": None, "respuesta_final": None,
-                 "intencion": None, "solo_responder": False}
+                 "intencion": None, "solo_responder": False, "acepta_oferta": False}
         if r.permitido:
             intencion = detectar_intencion(texto)
+            # El cliente responde a una propuesta reciente ("sí, me parece", "la de 75"): lo decide una regla.
+            oferta = state.get("oferta")
+            vigente = bool(oferta) and turno - oferta.get("turno", 0) <= 2
+            acepta = vigente and intencion != "cotizacion" and (es_confirmacion(texto) or bool(re.search(r"\d", texto)))
+            if acepta and (re.search(r"\d", texto) or oferta.get("opciones", 1) <= 1):
+                intencion = "pedido"      # una sola opción o eligió con un número: arma el borrador de inmediato
             det = "Entrada permitida" + (f" · intención detectada: {intencion}" if intencion else "")
-            return {**reset, "intencion": intencion, "traza": [_paso(turno, "guardrail_entrada", det, True)]}
+            if acepta:
+                det += " · el cliente responde a la propuesta anterior"
+            return {**reset, "intencion": intencion, "acepta_oferta": acepta,
+                    "traza": [_paso(turno, "guardrail_entrada", det, True)]}
         registrar_auditoria("cliente-whatsapp", "GUARDRAIL_BLOQUEO",
                             {"mensaje": texto[:500], "categoria": r.categoria, "patron": r.patron},
                             f"Bloqueado: {r.categoria}")
@@ -292,6 +305,12 @@ def build_graph(llm=None, checkpointer=None, respaldo=None):
                     "motivo_escalar": f"Límite de {cfg.MAX_ITERACIONES} iteraciones", "siguiente": "final",
                     "traza": [_paso(turno, "agente", f"Límite de {cfg.MAX_ITERACIONES} iteraciones alcanzado → escala", False)]}
         prompt = SYSTEM_PROMPT + _contexto_cliente(state.get("cliente_canal"))
+        if state.get("acepta_oferta") and state.get("oferta"):
+            of = state["oferta"]
+            prompt += (f"\nEl cliente responde a tu propuesta anterior. Propuesta del sistema: {of['texto']} "
+                       f"Borrador anterior: {json.dumps(of['borrador'], ensure_ascii=False)}. Si aceptó una opción clara, "
+                       "llama a preparar_borrador_pedido con ese borrador ajustado a la opción (mismo cliente y flor). "
+                       "Si hay varias opciones y no eligió, pregúntale cuál prefiere, sin llamar herramientas.")
         mensajes = [SystemMessage(content=prompt)] + [
             m for m in recortar_historial(state["messages"])]
         thread_id = (config or {}).get("configurable", {}).get("thread_id", "")
@@ -362,6 +381,10 @@ def build_graph(llm=None, checkpointer=None, respaldo=None):
                        v["aprobado"], checks=v["checks"])]
         upd = {"validacion": v, "intentos_validacion": intentos, "borrador_nuevo": False,
                "messages": [tool_msg], "traza": pasos}
+        # Si se rechaza, queda guardada la propuesta: el cliente puede aceptarla en su próximo mensaje.
+        upd["oferta"] = None if v["aprobado"] else {
+            "turno": turno, "texto": _texto_validacion(v), "borrador": state["borrador"],
+            "opciones": max(len(v["alternativas"]), 1)}
         if v["aprobado"]:
             upd["siguiente"] = "aprobacion"
         elif intentos >= cfg.MAX_INTENTOS_VALIDACION:
@@ -392,6 +415,7 @@ def build_graph(llm=None, checkpointer=None, respaldo=None):
                 item["sku"] = sku  # el borrador queda con el SKU ya resuelto
                 if sku in nuevas:
                     item["cantidad"] = nuevas[sku]
+                    item["unidad"] = "tallos"   # el supervisor edita siempre en tallos
                 item.setdefault("bodega", bodegas.get(sku))
             registrar_auditoria(usuario, "CANTIDAD_EDITADA", {"cantidades": nuevas}, "Se vuelve a validar")
             return {"borrador": b, "decision": decision, "siguiente": "validador",
