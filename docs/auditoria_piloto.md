@@ -12,7 +12,7 @@ Un agente de ventas por WhatsApp que atiende a cualquier número, vende **solo r
 | Plataforma (pedidos, despachos, ERP, conversaciones) | https://fuyu.fuyudatos.workers.dev/plataforma/entrar |
 | Formulario de entrega del cliente | enlace firmado que llega por WhatsApp al aceptar el pedido (`/despacho/?p=…&t=…`) |
 | Webhook del agente | https://submarginal-blaze-unpatronizingly.ngrok-free.dev/webhook (túnel temporal) |
-| Código del agente | https://github.com/EderCabascango/Agente_de_VentaFloricola_RAG-ERP (rama `agente-formulario`) |
+| Código del agente | https://github.com/EderCabascango/Agente_de_VentaFloricola_RAG-ERP (rama `main`) |
 | Código de la plataforma y el ERP | https://github.com/EderCabascango/Fuyu-landing (rama `main`) |
 
 ## Acceso
