@@ -20,6 +20,8 @@ PATRONES_INYECCION = [
     r"\b(apruebalo|apruebala|autoapru\w*)\b|\bapruebe?\s+tu\s+mismo",
     r"ignore\s+(all\s+|any\s+|previous\s+|your\s+|the\s+)*(instructions|rules)",
     r"<\s*/?\s*(system|instruction)s?\s*>",
+    r"\b(developer|debug|admin|god|root)\s+mode\b|\byou\s+are\s+now\b|\b(disregard|forget)\s+(all\s+|any\s+|everything\s+|your\s+|previous\s+)+",
+    r"\b(reveal|show|print|repeat|leak|tell\s+me)\b.{0,30}\b(your|the)\s+(system\s+)?(instructions|prompt|rules)\b",
 ]
 
 PATRONES_FUERA_DE_ALCANCE = [
