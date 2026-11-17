@@ -250,10 +250,10 @@ def _contexto_despachos(wa_id: Optional[str]) -> tuple[str, bool]:
         base += f", destino {d['destino']})" if d.get("destino") else ")"
         if d["estado"] == "FALTAN_DATOS":
             pedir = True
-            lineas.append(f"{base}: aceptado. FALTAN los datos de despacho.")
+            lineas.append(f"{base}: aceptado. FALTAN los datos de despacho. Formulario: {d.get('enlace') or 'sin enlace'}")
         elif d["estado"] == "DEVUELTO":
             pedir = True
-            lineas.append(f"{base}: un asesor devolvió los datos. Debe corregir: {d.get('motivo_devolucion')}")
+            lineas.append(f"{base}: un asesor devolvió los datos. Debe corregir: {d.get('motivo_devolucion')}. Formulario: {d.get('enlace') or 'sin enlace'}")
         elif d["estado"] == "POR_VALIDAR":
             lineas.append(f"{base}: ya tenemos los datos; un asesor los está validando.")
         else:
@@ -262,12 +262,12 @@ def _contexto_despachos(wa_id: Optional[str]) -> tuple[str, bool]:
              "\nPedidos aceptados de este cliente que todavía no salen (el primero es el más reciente):\n" + "\n".join(lineas))
     if pedir:
         texto += (
-            f"\nPara los pedidos con datos por pedir: pídele en UN solo mensaje nombre y teléfono de quien recibe, dirección "
-            f"y ciudad de entrega, fecha de entrega (hoy es {hoy}; conviértela a AAAA-MM-DD) y método de pago (transferencia, "
-            "crédito, contra entrega o efectivo). Revisa TODOS los mensajes anteriores del cliente: lo que ya dijo (por ejemplo la ciudad dentro de la dirección) no se vuelve a pedir; pide solo lo que falte y nunca llames la herramienta con campos vacíos. "
-            "Si hay varios pedidos por completar y el cliente no aclara cuál, usa el más reciente y pregúntaselo una vez. Cuando tengas TODOS, llama guardar_datos_despacho con el pedido_id exacto. "
-            "No inventes ni completes datos: si falta alguno, pregúntalo. Si el sistema rechaza un dato, explícale el motivo "
-            "y pídelo de nuevo. Tras guardar, dile que un asesor validará los datos y que le avisaremos por este chat.")
+            "\nPara los pedidos con datos por completar: envíale el enlace del formulario de ese pedido, exactamente como aparece, solo en su propia línea y sin punto ni signos pegados al final "
+            "(el cliente lo llena en 2 minutos y un asesor lo valida); no le pidas los datos uno por uno por el chat. "
+            "Si hay varios pedidos por completar y no aclara cuál, usa el más reciente. Si dice que no puede abrir el enlace, "
+            f"entonces sí pídele en UN solo mensaje nombre y teléfono de quien recibe, dirección y ciudad, fecha de entrega (hoy es {hoy}; "
+            "AAAA-MM-DD) y método de pago (transferencia, crédito, contra entrega o efectivo), sin repetir lo que ya dijo, y cuando tengas "
+            "TODOS llama guardar_datos_despacho con el pedido_id exacto (nunca con campos vacíos ni inventados).")
     return texto, pedir
 
 

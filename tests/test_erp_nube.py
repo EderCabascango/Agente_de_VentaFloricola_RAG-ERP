@@ -224,3 +224,11 @@ def test_la_herramienta_no_acepta_campos_en_blanco_y_dice_cuales_faltan(nube):
     r = guardar_datos_despacho.invoke({**DATOS_DESPACHO, "direccion": "", "ciudad": " ", "wa_id": WA})
     assert "direccion" in r["error"] and "ciudad" in r["error"]
     assert "/api/erp/despachos" not in nube.cuerpos
+
+
+def test_el_contexto_trae_el_enlace_del_formulario_y_manda_a_usarlo(nube):
+    from src.graph import _contexto_despachos
+    enlace = "https://fuyu.test/despacho/?p=PED-0007&t=1900000000.abc"
+    nube.despachos = [{"pedido_id": "PED-0007", "total": 120.0, "destino": "Quito", "estado": "FALTAN_DATOS", "enlace": enlace}]
+    texto, pedir = _contexto_despachos(WA)
+    assert pedir and enlace in texto and "formulario" in texto.lower() and "uno por uno" in texto
