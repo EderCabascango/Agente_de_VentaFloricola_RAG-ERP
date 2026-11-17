@@ -18,7 +18,7 @@ from src.validators import validar_borrador
     (ESCENARIOS[2]["mensaje"], "pedido"),
     (ESCENARIOS[3]["mensaje"], None),
     (ESCENARIOS[4]["mensaje"], None),
-    ("¿Cuánto cuesta 1000 tallos de gypsophila?", "cotizacion"),
+    ("¿Cuánto cuesta 1000 tallos de rosa Explorer?", "cotizacion"),
     ("Sí, confirmo 4000 tallos con 5%", "pedido"),
     ("Hola, buenos días", None),
 ])
@@ -65,13 +65,13 @@ def test_validador_entrega_alternativas_ya_calculadas():
     r = validar_borrador({"cliente": "C001", "destino": "Miami",
                           "items": [{"sku": "rosas freedom rojas de 70 cm", "cantidad": 20000, "descuento_pct": 25}]})
     alts = " ".join(r.alternativas)
-    assert "$2,280.00" in alts           # 4000 × 0.60 × 0.95 (solo Cayambe)
-    assert "$4,140.00" in alts           # 7500 × 0.60 × 0.92 (combinando las 3 fincas)
+    assert "$1,254.00" in alts           # 4000 × 0.33 × 0.95 (solo Cayambe)
+    assert "$2,277.00" in alts           # 7500 × 0.33 × 0.92 (combinando las 3 fincas)
 
 
 def test_producto_por_nombre_se_resuelve_sin_llm():
-    r = validar_borrador({"cliente": "C001", "items": [{"sku": "gypsophila blanca", "cantidad": 25}]})
-    assert r.aprobado and r.lineas[0].sku == "GYP-001"
+    r = validar_borrador({"cliente": "C001", "items": [{"sku": "explorer roja", "cantidad": 25}]})
+    assert r.aprobado and r.lineas[0].sku == "ROS-004"
     r2 = validar_borrador({"cliente": "C001", "items": [{"sku": "ROS‑005", "cantidad": 25}]})  # guion Unicode
     assert r2.aprobado and r2.lineas[0].sku == "ROS-005"
 
@@ -91,7 +91,7 @@ def test_rechazo_del_validador_fuerza_respuesta_sin_tools():
     llm = Espia(guion=[
         llamar(tool_call("preparar_borrador_pedido", cliente="C001",
                          items=[{"sku": "ROS-003", "cantidad": 20000, "descuento_pct": 25}])),
-        responder("Hay 4000 tallos en Cayambe: con 5% el total es $2,280.00. ¿Confirma?"),
+        responder("Hay 4000 tallos en Cayambe: con 5% el total es $1,254.00. ¿Confirma?"),
     ])
     g = build_graph(llm)
     conf = {"configurable": {"thread_id": uuid.uuid4().hex}}
@@ -158,11 +158,32 @@ def test_cotizacion_ambigua_devuelve_opciones_y_en_cajas_el_equivalente():
 def test_catalogo_para_la_pregunta_que_variedades_tienes():
     from src.tools import ver_catalogo
     resumen = ver_catalogo.invoke({})
-    cats = {c["categoria"]: c for c in resumen["categorias"]}
-    assert {"Rosas", "Rellenos", "Claveles"} <= set(cats)
-    assert "Rosa Freedom roja" in cats["Rosas"]["variedades"]          # los 3 largos se agrupan
-    assert cats["Rosas"]["precio_desde"] == 0.38
-    assert len(ver_catalogo.invoke({"categoria": "rosas"})["flores"]) == 15
+    assert resumen["total_variedades"] == 12            # el catálogo corto de los tests; el real trae 203
+    assert resumen["largos_cm"] == [50, 60, 70]
+    assert resumen["precio_desde"] == 0.22 and resumen["precio_hasta"] == 0.35
+    assert "coincidencias" not in resumen, "sin buscar no lista las variedades, solo cuántas hay"
+    freedom = ver_catalogo.invoke({"buscar": "freedom"})
+    assert freedom["total_coincidencias"] == 1
+    assert freedom["coincidencias"][0]["largos_cm"] == [50, 60, 70]    # los 3 largos se agrupan
+    assert (freedom["coincidencias"][0]["precio_desde"], freedom["coincidencias"][0]["precio_hasta"]) == (0.24, 0.33)
+    assert ver_catalogo.invoke({"buscar": "f"})["total_coincidencias"] == 2   # una letra = inicial: Freedom y Free Spirit
+
+
+def test_el_catalogo_solo_tiene_rosas():
+    from src.tools import ver_catalogo
+    erp = ERPClient()
+    assert {p["categoria"] for p in erp.listar_productos()} == {"Rosas"}
+    for otra in ("gypsophila", "clavel", "girasol", "hypericum", "limonium", "alstroemeria", "crisantemo"):
+        assert ver_catalogo.invoke({"buscar": otra})["total_coincidencias"] == 0, otra
+    assert all(0.18 <= p["precio_unitario"] <= 0.39 for p in erp.listar_productos()), "precios entre 18 y 39 ctvs"
+
+
+def test_el_prompt_dice_cuantas_variedades_hay_y_que_solo_son_rosas():
+    from src import config as cfg
+    from src.graph import SYSTEM_PROMPT
+    texto = SYSTEM_PROMPT.replace("{empresa}", cfg.EMPRESA).replace("{n}", "203")
+    assert "203 variedades" in texto and "SOLO rosas" in texto and cfg.EMPRESA in texto
+    assert "{n}" not in texto and "{empresa}" not in texto
 
 
 @pytest.mark.parametrize("texto,esperado", [
@@ -241,3 +262,18 @@ def test_si_con_varias_opciones_no_fuerza_nada_y_pregunta():
     assert Espia.forzados.count("preparar_borrador_pedido") >= 1
     assert llm.llamadas == 3
     assert pendiente_de_aprobacion(g, conf["configurable"]["thread_id"]) is None
+
+
+@pytest.mark.parametrize("texto", ["No la quiero en 50cm", "ya no quiero 20 bonches", "mejor no, cancela los 500 tallos"])
+def test_negaciones_no_son_pedido(texto):
+    from src.guardrails import detectar_intencion
+    assert detectar_intencion(texto) is None
+
+
+def test_limpiar_largos_quita_largo_inventado():
+    from langchain_core.messages import HumanMessage
+    from src.graph import _limpiar_largos
+    st = {"messages": [HumanMessage(content="Hola tienes Freedom? 40 bonches")]}
+    assert _limpiar_largos({"producto": "Freedom 50cm"}, st) == {"producto": "Freedom"}
+    st = {"messages": [HumanMessage(content="Freedom de 50cm")]}
+    assert _limpiar_largos({"producto": "Freedom 50cm"}, st) == {"producto": "Freedom 50cm"}

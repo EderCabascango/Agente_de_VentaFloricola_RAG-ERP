@@ -10,7 +10,7 @@ import json
 import operator
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Annotated, Any, Callable, Optional, TypedDict
 
 from langchain_core.messages import (AIMessage, BaseMessage, HumanMessage, RemoveMessage,
@@ -22,22 +22,23 @@ from langgraph.types import interrupt
 from pydantic import BaseModel
 
 from . import config as cfg
-from .erp_client import ErrorEscrituraERP, registrar_auditoria, registrar_pedido_aprobado
+from .erp_client import (ERPClient, despachos_pendientes, ErrorEscrituraERP, registrar_auditoria, registrar_pedido_aprobado,
+                         registrar_pedido_pendiente)
 from .grounding import verificar_citas, verificar_grounding
 from .guardrails import detectar_intencion, es_confirmacion, revisar_entrada
 from .tools import TOOLS, TOOLS_BY_NAME
 from .validators import validar_borrador
-from .whatsapp import formatear_para_whatsapp
+from .whatsapp import formatear_para_whatsapp, resumen_pedido_pendiente
 
-SYSTEM_PROMPT = """Asistente de ventas por WhatsApp de Rosaflor Andina, florícola exportadora de Cayambe (Ecuador). Atiendes a importadores y floristerías. Se vende por tallo, en bonches de 25 tallos; una caja completa son 400 tallos. Reglas:
-1. Usa solo datos de herramientas. Toda cifra que escribas debe aparecer tal cual en un resultado de herramienta. No calcules ni muestres operaciones: usa calcular_cotizacion.
+SYSTEM_PROMPT = """Asistente de ventas por WhatsApp de {empresa}, finca de rosas de Ecuador. Vendes SOLO rosas: {n} variedades, en largos de 40 a 80 cm. No hay claveles, gypsophila, hypericum, limonium, flores de verano ni otras flores: si preguntan por una, di con amabilidad que solo trabajan rosas y ofrece rosas. Se vende por tallo, en bonches de 25 tallos; una caja completa son 400 tallos. Reglas:
+1. Precios, cantidades y totales salen SIEMPRE de las herramientas, nunca de tu memoria ni de tus cuentas: toda cifra que escribas debe aparecer tal cual en un resultado de herramienta. Para cotizar usa calcular_cotizacion y muestra siempre el precio por tallo, la cantidad (tallos y bonches) y el total neto. No muestres operaciones.
 2. Si no hay dato (p. ej. precios futuros o de temporada), responde solo: "No tengo esa información, la derivo a un asesor."
 3. Políticas, envíos, reclamos y cuidado de la flor: buscar_politicas. Cita solo archivos que devolvió, ej. [tiempos_envio.md].
-4. Solo si el cliente pide comprar o hacer un pedido, llama de inmediato a preparar_borrador_pedido con exactamente lo que pidió: cada línea con su cantidad y su unidad tal como la dijo (tallos, bonches o cajas; no conviertas, el sistema convierte), descuento y flor por nombre o SKU. No revises stock, bonches, crédito ni descuento: lo hace el validador. Nunca registras en el ERP. Una consulta de precio o descuento NO es un pedido: usa calcular_cotizacion (aplica la política y el tope del cliente).
+4. Solo si el cliente pide comprar o hacer un pedido, llama de inmediato a preparar_borrador_pedido con exactamente lo que pidió: cada línea con su cantidad y su unidad tal como la dijo (tallos, bonches o cajas; no conviertas, el sistema convierte), descuento y rosa por nombre o SKU. No revises stock, bonches, crédito ni descuento: lo hace el validador. Nunca registras en el ERP. Una consulta de precio o descuento NO es un pedido: usa calcular_cotizacion (aplica la política y el tope del cliente).
 5. Si el validador rechaza: explica sus motivos y ofrece sus alternativas con sus cifras exactas, sin calcular otras; pide confirmación.
-6. Si piden ver variedades o catálogo, usa ver_catalogo y ofrece las categorías con su rango de precios; luego pregunta qué le interesa. Si una flor puede ser varias (largos o colores), pregunta cuál antes de cotizar.
-7. Termina con una pregunta corta que avance la venta (cantidad, largo o destino).
-8. Llama en paralelo las herramientas independientes. Español, tono cordial de WhatsApp, máximo 90 palabras, sin tablas ni títulos; *negrita* con un asterisco, solo en cifras clave (nunca un mensaje entero). Precios en USD FOB Quito."""
+6. Si preguntan qué variedades hay, usa ver_catalogo: di cuántas variedades de rosa tienes ({n}) y su rango de precios, y pregunta cuál busca o qué largo; no las listes todas. Si buscan una por nombre o inicial, usa ver_catalogo con buscar. Si una rosa existe en varios largos, pregunta cuál antes de cotizar.
+7. Termina con una pregunta corta que avance la venta (variedad, largo o cantidad).
+8. Nunca asumas el largo (cm): si el cliente no lo dijo, pregúntale cuál prefiere entre los disponibles. Llama en paralelo las herramientas independientes. Español, tono cordial de WhatsApp, máximo 90 palabras, sin tablas ni títulos; *negrita* con un asterisco, solo en cifras clave (nunca un mensaje entero). Precios en USD por tallo. 9. Si preguntan qué modelo, tecnología o empresa de IA usas, responde que eres el asistente virtual de ventas y no das detalles técnicos; nunca afirmes un proveedor."""
 
 TOOL_FORZADA = {"pedido": "preparar_borrador_pedido", "cotizacion": "calcular_cotizacion"}
 
@@ -62,6 +63,8 @@ class AgentState(TypedDict, total=False):
     reintentos_grounding: int
     decision: Optional[dict]
     pedido_creado: Optional[dict]
+    pedido_pendiente: Optional[dict]   # pedido dejado PENDIENTE en el ERP (modo "erp")
+    wa_id: Optional[str]               # número de WhatsApp que escribe (lo pone el canal)
     escalar: bool
     motivo_escalar: str
     bloqueado: bool
@@ -132,6 +135,27 @@ def invocar_con_reintentos(llm, mensajes, config, thread_id: str = "", esperas=(
             if hook:
                 hook(intento + 1, espera, f"{type(e).__name__}: {str(e)[:120]}")
             time.sleep(espera)
+
+
+_LARGO_RE = re.compile(r"\s*\b(\d{2,3})\s*cm\b", re.I)
+
+
+def _limpiar_largos(args, state):
+    """Quita un largo (p. ej. '50cm') del nombre de flor si el cliente nunca lo dijo: así la herramienta
+    devuelve las medidas disponibles en vez de que el modelo escoja una por su cuenta."""
+    dichos = {m for h in state["messages"] if isinstance(h, HumanMessage) and not es_interno(h)
+              for m in re.findall(r"\b(\d{2,3})\s*(?:cm|centimetros|centímetros)?\b", texto_de(h), re.I)}
+
+    def limpia(x):
+        if isinstance(x, str):
+            return _LARGO_RE.sub(lambda m: m.group(0) if m.group(1) in dichos else "", x).strip()
+        if isinstance(x, dict):
+            return {k: (limpia(v) if k in ("producto", "solicitado", "texto", "buscar") else limpia(v) if isinstance(v, (dict, list)) else v)
+                    for k, v in x.items()}
+        if isinstance(x, list):
+            return [limpia(v) for v in x]
+        return x
+    return limpia(args)
 
 
 def texto_de(msg: BaseMessage) -> str:
@@ -213,6 +237,40 @@ def _contexto_cliente(cliente: Optional[dict]) -> str:
             "Usa ese ID como cliente en las herramientas.")
 
 
+def _contexto_despachos(wa_id: Optional[str]) -> tuple[str, bool]:
+    """Pedidos aceptados de este cliente que aún no salen. Devuelve (texto para el prompt, si hay datos por pedir)."""
+    pend = despachos_pendientes(wa_id or "")
+    if not pend:
+        return "", False
+    ahora_ec = datetime.utcnow() - timedelta(hours=5)
+    hoy, manana = ahora_ec.date().isoformat(), (ahora_ec + timedelta(days=1)).date().isoformat()
+    lineas, pedir = [], False
+    for d in pend:
+        base = f"- {d['pedido_id']} (total ${d['total']:.2f}"
+        base += f", destino {d['destino']})" if d.get("destino") else ")"
+        if d["estado"] == "FALTAN_DATOS":
+            pedir = True
+            lineas.append(f"{base}: aceptado. FALTAN los datos de despacho.")
+        elif d["estado"] == "DEVUELTO":
+            pedir = True
+            lineas.append(f"{base}: un asesor devolvió los datos. Debe corregir: {d.get('motivo_devolucion')}")
+        elif d["estado"] == "POR_VALIDAR":
+            lineas.append(f"{base}: ya tenemos los datos; un asesor los está validando.")
+        else:
+            lineas.append(f"{base}: datos validados, el despacho sale pronto.")
+    texto = (f"\nFecha de hoy: {hoy}; mañana: {manana}."
+             "\nPedidos aceptados de este cliente que todavía no salen (el primero es el más reciente):\n" + "\n".join(lineas))
+    if pedir:
+        texto += (
+            f"\nPara los pedidos con datos por pedir: pídele en UN solo mensaje nombre y teléfono de quien recibe, dirección "
+            f"y ciudad de entrega, fecha de entrega (hoy es {hoy}; conviértela a AAAA-MM-DD) y método de pago (transferencia, "
+            "crédito, contra entrega o efectivo). Revisa TODOS los mensajes anteriores del cliente: lo que ya dijo (por ejemplo la ciudad dentro de la dirección) no se vuelve a pedir; pide solo lo que falte y nunca llames la herramienta con campos vacíos. "
+            "Si hay varios pedidos por completar y el cliente no aclara cuál, usa el más reciente y pregúntaselo una vez. Cuando tengas TODOS, llama guardar_datos_despacho con el pedido_id exacto. "
+            "No inventes ni completes datos: si falta alguno, pregúntalo. Si el sistema rechaza un dato, explícale el motivo "
+            "y pídelo de nuevo. Tras guardar, dile que un asesor validará los datos y que le avisaremos por este chat.")
+    return texto, pedir
+
+
 # ============================ construcción ===============================
 
 def _aplanar_para_responder(mensajes: list[BaseMessage]) -> list[BaseMessage]:
@@ -240,10 +298,21 @@ def _sanear_para_respaldo(mensajes: list[BaseMessage]) -> list[BaseMessage]:
     return out
 
 
-def build_graph(llm=None, checkpointer=None, respaldo=None):
-    """llm: modelo principal. respaldo: modelo de otro proveedor que toma la llamada si el principal falla."""
+def build_graph(llm=None, checkpointer=None, respaldo=None, aprobacion=None):
+    """llm: modelo principal. respaldo: modelo de otro proveedor que toma la llamada si el principal falla.
+
+    aprobacion: "erp" (el pedido queda PENDIENTE en el ERP y se acepta en la plataforma) o "interrupt"
+    (el grafo se pausa y se aprueba con botones). Por defecto, lo que diga APROBACION en la configuración.
+    """
+    aprobacion = (aprobacion or cfg.APROBACION).lower()
     llm = llm if llm is not None else cfg.get_llm()
     llm_tools = llm.bind_tools(TOOLS)
+    # El número de variedades sale del ERP, no está escrito a mano: si cambia el catálogo, cambia el prompt.
+    try:
+        n_variedades = str(ERPClient().catalogo_resumen()["total_variedades"])
+    except Exception:  # noqa: BLE001 — sin ERP disponible el agente igual arranca
+        n_variedades = "varias"
+    prompt_base = SYSTEM_PROMPT.replace("{empresa}", cfg.EMPRESA).replace("{n}", n_variedades)
     respaldo_tools = respaldo.bind_tools(TOOLS) if respaldo is not None else None
     # Variantes que OBLIGAN a usar una tool: las elige una regla, no el LLM. Se expone SOLO esa tool
     # (Groq no restringe la generación con tool_choice si hay varias tools disponibles).
@@ -272,7 +341,7 @@ def build_graph(llm=None, checkpointer=None, respaldo=None):
         r = revisar_entrada(texto)
         reset = {"turno": turno, "iteraciones": 0, "borrador": None, "borrador_call_id": None,
                  "borrador_nuevo": False, "validacion": None, "intentos_validacion": 0,
-                 "reintentos_grounding": 0, "decision": None, "pedido_creado": None, "escalar": False,
+                 "reintentos_grounding": 0, "decision": None, "pedido_creado": None, "pedido_pendiente": None, "escalar": False,
                  "motivo_escalar": "", "bloqueado": False, "grounding": None, "respuesta_final": None,
                  "intencion": None, "solo_responder": False, "acepta_oferta": False}
         if r.permitido:
@@ -304,7 +373,9 @@ def build_graph(llm=None, checkpointer=None, respaldo=None):
             return {"messages": [AIMessage(content=msg)], "escalar": True,
                     "motivo_escalar": f"Límite de {cfg.MAX_ITERACIONES} iteraciones", "siguiente": "final",
                     "traza": [_paso(turno, "agente", f"Límite de {cfg.MAX_ITERACIONES} iteraciones alcanzado → escala", False)]}
-        prompt = SYSTEM_PROMPT + _contexto_cliente(state.get("cliente_canal"))
+        prompt = prompt_base + _contexto_cliente(state.get("cliente_canal"))
+        ctx_despacho, pedir_despacho = _contexto_despachos(state.get("wa_id"))
+        prompt += ctx_despacho
         if state.get("acepta_oferta") and state.get("oferta"):
             of = state["oferta"]
             prompt += (f"\nEl cliente responde a tu propuesta anterior. Propuesta del sistema: {of['texto']} "
@@ -319,7 +390,7 @@ def build_graph(llm=None, checkpointer=None, respaldo=None):
         # puede explicar el veredicto (que ya trae las alternativas calculadas), no investigar ni calcular.
         sin_tools = it == cfg.MAX_ITERACIONES or bool(state.get("solo_responder"))
         # Primera llamada del turno con intención clara: la tool la decide una regla, no el modelo.
-        forzar = TOOL_FORZADA.get(state.get("intencion")) if it == 0 else None
+        forzar = TOOL_FORZADA.get(state.get("intencion")) if it == 0 and not pedir_despacho else None
         if forzar:
             mensajes[0] = SystemMessage(content=prompt + f"\nAhora llama a {forzar} con lo que pidió el cliente.")
         if sin_tools:
@@ -327,7 +398,15 @@ def build_graph(llm=None, checkpointer=None, respaldo=None):
                                       "sistema que tienes; no hay herramientas disponibles.")] + \
                        _aplanar_para_responder(mensajes[1:])
         t0 = time.time()
-        resp = invocar(mensajes, config, thread_id, sin_tools=sin_tools, forzar=forzar)
+        try:
+            resp = invocar(mensajes, config, thread_id, sin_tools=sin_tools, forzar=forzar)
+        except LLMNoDisponible as e:
+            # El proveedor rechazó la herramienta obligatoria (el modelo prefirió responder): se reintenta libre.
+            if forzar and "tool choice is required" in str(e).lower():
+                libres = [SystemMessage(content=prompt)] + mensajes[1:]
+                resp = invocar(libres, config, thread_id, sin_tools=False, forzar=None)
+            else:
+                raise
         seg = round(time.time() - t0, 2)
         modelo = (resp.response_metadata or {}).get("model_name") or (resp.response_metadata or {}).get("model", "")
         if resp.tool_calls:
@@ -350,6 +429,9 @@ def build_graph(llm=None, checkpointer=None, respaldo=None):
             try:
                 if herramienta is None:
                     raise ValueError(f"Herramienta desconocida: {nombre}")
+                args = _limpiar_largos(args, state)
+                if nombre == "guardar_datos_despacho":
+                    args = {**args, "wa_id": state.get("wa_id") or ""}  # siempre el número que escribe, no el que diga el modelo
                 res = herramienta.invoke(args)
                 ok = not (isinstance(res, dict) and "error" in res)
             except Exception as e:  # noqa: BLE001
@@ -432,6 +514,25 @@ def build_graph(llm=None, checkpointer=None, respaldo=None):
                 "messages": [AIMessage(content=msg)],
                 "traza": [_paso(turno, "aprobacion_humana", f"RECHAZADO por {usuario}", False)]}
 
+    def registrar_pendiente(state: AgentState) -> dict:
+        """Modo "erp": el pedido ya validado queda PENDIENTE en el ERP y el cliente ve precio, cantidad y total.
+
+        No se escribe stock: eso ocurre cuando una persona lo acepta en la plataforma.
+        """
+        v = state["validacion"]
+        turno = state["turno"]
+        try:
+            r = registrar_pedido_pendiente(v, wa_id=state.get("wa_id"), destino=v.get("destino"))
+        except Exception as e:  # noqa: BLE001 — si el ERP falla, el cliente no se queda sin respuesta
+            registrar_auditoria(USUARIO_SISTEMA, "PENDIENTE_FALLIDO", {"error": str(e)[:300]}, "Derivado a un asesor")
+            msg = "No pude dejar su pedido registrado por una falla técnica; un asesor lo revisará y le escribirá por aquí."
+            return {"messages": [AIMessage(content=msg)], "escalar": True, "motivo_escalar": "No se pudo guardar el pedido pendiente",
+                    "traza": [_paso(turno, "registrar_pendiente", f"ERROR: {str(e)[:160]}", False)]}
+        texto = resumen_pedido_pendiente(v, r["pedido_id"])
+        return {"pedido_pendiente": r, "messages": [AIMessage(content=texto)],
+                "traza": [_paso(turno, "registrar_pendiente",
+                                f"{r['pedido_id']} guardado PENDIENTE en el ERP por ${r['total']:,.2f}; se acepta en la plataforma", True)]}
+
     def escribir_erp(state: AgentState) -> dict:
         turno = state["turno"]
         decision = state.get("decision") or {}
@@ -457,7 +558,7 @@ def build_graph(llm=None, checkpointer=None, respaldo=None):
         turno = state["turno"]
         ultimo = state["messages"][-1]
         texto = texto_de(ultimo)
-        fuentes = [texto_de(m) for m in state["messages"]
+        fuentes = [prompt_base, _contexto_despachos(state.get("wa_id"))[0]] + [texto_de(m) for m in state["messages"]
                    if isinstance(m, ToolMessage) or (isinstance(m, HumanMessage) and not es_interno(m))]
         g = verificar_grounding(texto, fuentes)
         # Citas: solo se pueden citar archivos que buscar_politicas devolvió en esta conversación
@@ -532,7 +633,7 @@ def build_graph(llm=None, checkpointer=None, respaldo=None):
             escalar, motivo = True, "El agente no tenía datos para responder"
         if escalar:
             registrar_auditoria(USUARIO_SISTEMA, "ESCALADO_A_ASESOR", {"respuesta": texto[:300]}, motivo)
-        if state.get("bloqueado") or state.get("pedido_creado"):
+        if state.get("bloqueado") or state.get("pedido_creado") or state.get("pedido_pendiente"):
             confianza = "alta"
         elif escalar:
             confianza = "baja"
@@ -542,7 +643,7 @@ def build_graph(llm=None, checkpointer=None, respaldo=None):
             confianza = "media"
         rf = RespuestaFinal(respuesta=texto, fuentes=fuentes, datos_usados=datos, nivel_confianza=confianza,
                             escalar_a_asesor=escalar, respuesta_whatsapp=formatear_para_whatsapp(texto),
-                            pedido_id=(state.get("pedido_creado") or {}).get("pedido_id"))
+                            pedido_id=(state.get("pedido_creado") or state.get("pedido_pendiente") or {}).get("pedido_id"))
         upd = {"respuesta_final": rf.model_dump(), "escalar": escalar, "motivo_escalar": motivo,
                "traza": [_paso(turno, "respuesta_final",
                                f"confianza={confianza}" + (f", ESCALADO ({motivo})" if escalar else ""), True)]}
@@ -557,6 +658,7 @@ def build_graph(llm=None, checkpointer=None, respaldo=None):
     g.add_node("herramientas", herramientas)
     g.add_node("validador_deterministico", validador_deterministico)
     g.add_node("aprobacion_humana", aprobacion_humana)
+    g.add_node("registrar_pendiente", registrar_pendiente)
     g.add_node("escribir_erp", escribir_erp)
     g.add_node("grounding_check", grounding_check)
     g.add_node("respuesta_final", respuesta_final)
@@ -570,10 +672,12 @@ def build_graph(llm=None, checkpointer=None, respaldo=None):
     g.add_conditional_edges("herramientas",
                             lambda s: "validador_deterministico" if s.get("borrador_nuevo") else "agente",
                             ["validador_deterministico", "agente"])
+    destino_aprobacion = "registrar_pendiente" if aprobacion == "erp" else "aprobacion_humana"
     g.add_conditional_edges("validador_deterministico",
-                            lambda s: {"aprobacion": "aprobacion_humana", "agente": "agente"}
+                            lambda s: {"aprobacion": destino_aprobacion, "agente": "agente"}
                             .get(s.get("siguiente"), "respuesta_final"),
-                            ["aprobacion_humana", "agente", "respuesta_final"])
+                            ["aprobacion_humana", "registrar_pendiente", "agente", "respuesta_final"])
+    g.add_edge("registrar_pendiente", "respuesta_final")
     g.add_conditional_edges("aprobacion_humana",
                             lambda s: {"escribir": "escribir_erp", "validador": "validador_deterministico"}
                             .get(s.get("siguiente"), "respuesta_final"),
@@ -598,3 +702,10 @@ def pendiente_de_aprobacion(graph, thread_id: str) -> Optional[dict]:
         for intr in getattr(task, "interrupts", []) or []:
             return intr.value
     return None
+
+
+def traza_resumida(traza: list[dict], turno: int) -> list[dict]:
+    """Los pasos del turno que vale la pena mostrar en la plataforma: herramientas, validador y registro del pedido."""
+    nodos = ("guardrail_entrada", "validador_deterministico", "registrar_pendiente", "grounding_check")
+    return [{"nodo": p["nodo"], "detalle": str(p.get("detalle", ""))[:160], "ok": p.get("ok")}
+            for p in traza or [] if p.get("turno") == turno and (str(p.get("nodo", "")).startswith("tool:") or p.get("nodo") in nodos)]

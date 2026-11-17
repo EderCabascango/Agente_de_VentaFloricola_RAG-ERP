@@ -10,6 +10,13 @@ ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env", override=False)
 
 DB_PATH = Path(os.getenv("ERP_DB_PATH", str(ROOT / "erp.db")))
+EMPRESA = os.getenv("EMPRESA", "Grupo CFG").strip() or "Grupo CFG"
+# ERP en la nube (Cloudflare D1, ver la plataforma de la landing). Sin ERP_URL se usa el ERP local (erp.db).
+ERP_URL = os.getenv("ERP_URL", "").strip().rstrip("/")
+ERP_TOKEN = os.getenv("ERP_TOKEN", "").strip()
+# Cómo se aprueba un pedido: "erp" = queda PENDIENTE en el ERP y una persona lo acepta o rechaza en la plataforma;
+# "interrupt" = el grafo se pausa y se aprueba con botones (demo de Streamlit o WhatsApp).
+APROBACION = os.getenv("APROBACION", "erp" if ERP_URL else "interrupt").strip().lower()
 POLICIES_DIR = ROOT / "data" / "policies"
 CHROMA_DIR = ROOT / ".chroma"
 EMBEDDINGS_MODEL = os.getenv(
@@ -19,6 +26,12 @@ MAX_ITERACIONES = int(os.getenv("MAX_ITERACIONES", "6"))
 MAX_INTENTOS_VALIDACION = 3
 # Si la API pide esperar más que esto (segundos) y hay respaldo, se pasa al respaldo en vez de esperar.
 FALLBACK_MAX_ESPERA = float(os.getenv("FALLBACK_MAX_ESPERA", "3"))
+
+# Clientes nuevos que escriben por WhatsApp sin estar en el ERP: se registran solos con condiciones
+# conservadoras (sin descuento propio y un límite de crédito de prueba). El pedido igual necesita
+# la aprobación de un supervisor, que ve que es un cliente nuevo.
+CLIENTE_NUEVO_LIMITE_CREDITO = float(os.getenv("CLIENTE_NUEVO_LIMITE_CREDITO", "2000"))
+CLIENTE_NUEVO_DESCUENTO_MAX = float(os.getenv("CLIENTE_NUEVO_DESCUENTO_MAX", "0"))
 
 PROVEEDORES = ["gemini", "groq", "ollama", "azure"]
 MODELOS_POR_DEFECTO = {

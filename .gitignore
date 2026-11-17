@@ -4,6 +4,9 @@
 !.env.example
 .streamlit/secrets.toml
 
+# Lista de variedades del cliente (dato del cliente: no se sube al repositorio)
+data/variedades_cfg.*
+
 # Datos generados
 erp.db
 erp.db-journal

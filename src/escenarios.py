@@ -11,21 +11,21 @@ ESCENARIOS = [
     {
         "id": 1,
         "titulo": "1 · Cotización",
-        "mensaje": "Hola, buenos días. ¿Qué descuento nos aplica para 5000 tallos de rosa Freedom roja de 60 cm "
+        "mensaje": "Hola, buenos días. ¿Qué descuento nos aplica para 5000 tallos de rosa Freedom de 60 cm "
                    "y en cuánto tiempo llegan a Miami?",
         "esperado": "Responde con el precio del ERP y el 8% por volumen, y cita la política de envíos.",
     },
     {
         "id": 2,
         "titulo": "2 · Pedido válido",
-        "mensaje": "Perfecto. Queremos pedir 2000 tallos de rosa Freedom roja de 60 cm y 1000 tallos de "
-                   "gypsophila blanca, con destino Miami.",
+        "mensaje": "Perfecto. Queremos pedir 2000 tallos de rosa Freedom de 60 cm y 1000 tallos de "
+                   "rosa Explorer de 60 cm, con destino Miami.",
         "esperado": "Pasa las validaciones, queda pendiente, el supervisor lo aprueba y aparece en el ERP.",
     },
     {
         "id": 3,
         "titulo": "3 · Pedido con error",
-        "mensaje": "Para un evento grande necesitamos 20000 tallos de rosa Freedom roja de 70 cm con 25% de "
+        "mensaje": "Para un evento grande necesitamos 40000 tallos de rosa Freedom de 70 cm con 25% de "
                    "descuento, destino Miami.",
         "esperado": "El validador lo bloquea (stock, descuento y crédito) y el agente propone alternativas.",
     },
@@ -50,13 +50,13 @@ ESCENARIOS = [
     {
         "id": 7,
         "titulo": "7 · Variedades",
-        "mensaje": "Hola, quiero comprar flor pero no sé qué variedades tienen. ¿Qué me recomiendan?",
-        "esperado": "Muestra el catálogo por categorías con precios y pregunta qué le interesa (no escala).",
+        "mensaje": "Hola, quiero comprar rosas pero no sé qué variedades tienen. ¿Qué me recomiendan?",
+        "esperado": "Dice cuántas variedades de rosa tiene, el rango de precios y pregunta cuál busca (no las lista todas, no escala).",
     },
     {
         "id": 8,
         "titulo": "8 · Pedido en cajas",
-        "mensaje": "Quiero 5 cajas de rosa Mondial blanca de 60 cm, destino Ámsterdam.",
+        "mensaje": "Quiero 5 cajas de rosa Mondial de 60 cm, destino Ámsterdam.",
         "esperado": "El código convierte 5 cajas a 2.000 tallos, valida y queda pendiente de aprobación.",
     },
 ]

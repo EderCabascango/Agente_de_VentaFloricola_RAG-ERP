@@ -45,7 +45,7 @@ Botón **2 · Pedido válido**.
 
 ## 3 · Pedido con error (45 s)
 
-Botón **3 · Pedido con error** (20.000 tallos de Freedom 70 cm con 25 % de descuento).
+Botón **3 · Pedido con error** (40.000 tallos de Freedom 70 cm con 25 % de descuento).
 
 - **Aprobaciones** muestra el borrador **bloqueado en rojo**: stock (hay 4.000 en Cayambe), descuento (máximo 10 %) y crédito ($9.000 sobre $8.000).
 - El agente ofrece dos alternativas **calculadas por el validador**: 4.000 tallos desde Cayambe por **$2.280**, o combinando las tres fincas 7.500 tallos por **$4.140**.

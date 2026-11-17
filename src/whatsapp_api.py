@@ -41,7 +41,9 @@ class AjustesWhatsApp:
     version: str = "v24.0"
     supervisores: frozenset[str] = frozenset()      # wa_id (solo dígitos) que pueden aprobar pedidos
     clientes: dict[str, str] | None = None           # wa_id -> ID de cliente del ERP (testers del piloto)
-    cliente_por_defecto: str = ""                    # ID de cliente para números no registrados ("" = no atender)
+    cliente_por_defecto: str = ""                    # ID de cliente para números no registrados ("" = registrarlos)
+    registrar_nuevos: bool = True                    # False: los números desconocidos esperan a un asesor
+    max_mensajes_minuto: int = 15                    # tope por número: protege la cuota del LLM (0 = sin tope)
 
     @classmethod
     def desde_entorno(cls) -> "AjustesWhatsApp":
@@ -66,6 +68,8 @@ class AjustesWhatsApp:
             supervisores=frozenset(digitos(n) for n in os.getenv("WHATSAPP_SUPERVISORES", "").split(",") if digitos(n)),
             clientes=clientes,
             cliente_por_defecto=os.getenv("WHATSAPP_CLIENTE_POR_DEFECTO", "").strip(),
+            registrar_nuevos=os.getenv("WHATSAPP_REGISTRAR_NUEVOS", "1").strip().lower() not in ("0", "no", "false"),
+            max_mensajes_minuto=int(os.getenv("WHATSAPP_MAX_MENSAJES_MINUTO", "15") or 0),
         )
 
 

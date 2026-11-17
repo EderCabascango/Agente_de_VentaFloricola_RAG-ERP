@@ -1,6 +1,7 @@
 """Webhook de WhatsApp de punta a punta, sin red: la Graph API es un doble que registra lo que se envía."""
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import hmac
 import json
@@ -9,10 +10,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from mock_llm import ScriptedChatModel, llamar, responder, tool_call
-from src.erp_client import ERPClient
+from src.erp_client import ERPClient, registrar_cliente_whatsapp
 from src.graph import build_graph
+from src.validators import validar_borrador
 from src.whatsapp_api import AjustesWhatsApp, ErrorWhatsApp, extraer_mensajes, firma_valida
-from webhook import MSG_NO_REGISTRADO, MSG_PENDIENTE, MSG_SOLO_TEXTO, MSG_YA_PENDIENTE, crear_app
+from webhook import (MSG_DEMASIADOS, MSG_NO_REGISTRADO, MSG_PENDIENTE, MSG_SOLO_TEXTO, MSG_YA_PENDIENTE,
+                     crear_app)
 
 SECRETO = "secreto-de-prueba"
 CLIENTE_WA = "13055550142"      # Bloom Imports LLC en el ERP sintético
@@ -115,11 +118,85 @@ def test_mensaje_repetido_por_meta_se_atiende_una_vez():
     assert llm.llamadas == 1 and len(api.textos_a(CLIENTE_WA)) == 1
 
 
-def test_numero_no_registrado_no_llama_al_llm():
-    client, api, llm = _cliente([])
+def test_numero_desconocido_con_registro_desactivado_espera_a_un_asesor():
+    client, api, llm = _cliente([], ajustes=dataclasses.replace(AJUSTES, registrar_nuevos=False))
     _post(client, _payload("5491100000000", "hola"))
     assert llm.llamadas == 0 and api.textos_a("5491100000000") == [MSG_NO_REGISTRADO]
     assert "NUMERO_NO_REGISTRADO" in [a["accion"] for a in ERPClient().auditoria(10)]
+
+
+# ------------------------------------------------------------------ cualquier número recibe atención
+DESCONOCIDO_WA = "5491100000000"
+
+
+def _clientes_en_erp() -> int:
+    return len(ERPClient()._all("SELECT id FROM clientes"))
+
+
+def test_cualquier_numero_recibe_respuesta_y_se_registra_como_cliente_nuevo():
+    antes = _clientes_en_erp()
+    client, api, llm = _cliente([responder("No tengo esa información, la derivo a un asesor.")])
+    _post(client, _payload(DESCONOCIDO_WA, "hola, ¿precio para San Valentín del próximo año?", nombre="Lucía Pérez"))
+    assert llm.llamadas == 1 and api.textos_a(DESCONOCIDO_WA), "el agente le responde sin pedir que lo registren"
+    c = ERPClient().get_cliente(DESCONOCIDO_WA)
+    assert c["id"] == f"W{DESCONOCIDO_WA}" and c["segmento"] == "Nuevo" and "Lucía Pérez" in c["razon_social"]
+    assert c["descuento_max"] == 0 and c["credito_disponible"] == 2000.0 and c["pais"] == "Por confirmar"
+    assert _clientes_en_erp() == antes + 1
+    assert "CLIENTE_REGISTRADO_WHATSAPP" in [a["accion"] for a in ERPClient().auditoria(10)]
+
+
+def test_segundo_mensaje_del_mismo_numero_reutiliza_el_cliente():
+    client, api, llm = _cliente([responder("Uno."), responder("Dos.")])
+    antes = _clientes_en_erp()
+    _post(client, _payload(DESCONOCIDO_WA, "primera consulta"))
+    _post(client, _payload(DESCONOCIDO_WA, "segunda consulta"))
+    assert llm.llamadas == 2 and _clientes_en_erp() == antes + 1
+
+
+def test_registro_es_idempotente_y_deduce_el_pais_por_el_prefijo():
+    assert registrar_cliente_whatsapp("593991234567", "Ana")["nuevo"] is True
+    assert registrar_cliente_whatsapp("593991234567", "Ana")["nuevo"] is False
+    assert ERPClient().get_cliente("593991234567")["pais"] == "Ecuador"
+    with pytest.raises(Exception):
+        registrar_cliente_whatsapp("123", "Corto")
+
+
+def test_cliente_nuevo_no_recibe_descuento_por_volumen_y_tiene_tope_de_credito():
+    registrar_cliente_whatsapp(DESCONOCIDO_WA, "Nuevo")
+    cid = f"W{DESCONOCIDO_WA}"
+    ok = validar_borrador({"cliente": cid, "items": [{"producto": "ROS-002", "cantidad": 3000}]})
+    assert ok.aprobado and ok.lineas[0].descuento_pct == 0 and ok.total == 840.0   # 3000 × 0.28, sin descuento
+    grande = validar_borrador({"cliente": cid, "items": [{"producto": "ROS-002", "cantidad": 8000}]})   # 2240 > 2000
+    assert not grande.aprobado and any("crédito" in m for m in grande.motivos)
+
+
+def test_pedido_de_cliente_nuevo_avisa_al_supervisor_que_es_nuevo():
+    guion = [llamar(tool_call("preparar_borrador_pedido", cliente=f"W{DESCONOCIDO_WA}", destino="Quito",
+                              items=[{"sku": "ROS-002", "cantidad": 500}]))]
+    client, api, _ = _cliente(guion)
+    _post(client, _payload(DESCONOCIDO_WA, "Quiero pedir 500 tallos de rosa Freedom 60 cm"))
+    (aviso,) = _botones_al_supervisor(api)
+    assert "Cliente nuevo" in aviso[2] and "Total: $140.00" in aviso[2]
+    (resumen,) = api.textos_a(DESCONOCIDO_WA)
+    assert "pendiente de aprobación" in resumen and "$0.28 c/u" in resumen and "*Total: $140.00*" in resumen
+
+
+def test_el_supervisor_tambien_puede_escribir_como_cliente():
+    client, api, llm = _cliente([responder("No tengo esa información, la derivo a un asesor.")])
+    _post(client, _payload(SUPERVISOR_WA, "¿precio para San Valentín del próximo año?"))
+    assert llm.llamadas == 1 and api.textos_a(SUPERVISOR_WA)
+    assert ERPClient().get_cliente(SUPERVISOR_WA)["segmento"] == "Nuevo"
+
+
+def test_tope_de_mensajes_por_minuto_protege_la_cuota():
+    ajustes = dataclasses.replace(AJUSTES, max_mensajes_minuto=3)
+    client, api, llm = _cliente([responder("Respuesta.")] * 3, ajustes=ajustes)
+    for i in range(6):
+        _post(client, _payload(DESCONOCIDO_WA, f"mensaje {i}"))
+    assert llm.llamadas == 3, "lo que pasa del tope no llega al modelo"
+    assert api.textos_a(DESCONOCIDO_WA).count(MSG_DEMASIADOS) == 1, "se avisa una sola vez"
+    assert "TOPE_MENSAJES" in [a["accion"] for a in ERPClient().auditoria(10)]
+    assert not api.textos_a("13055550142"), "otro número no se ve afectado"
 
 
 def test_tester_del_piloto_se_mapea_a_un_cliente_del_erp():
@@ -152,7 +229,7 @@ def test_inyeccion_bloqueada_tambien_por_whatsapp():
 # ------------------------------------------------------------------ pedido con aprobación por WhatsApp
 def _guion_pedido():
     return [llamar(tool_call("preparar_borrador_pedido", cliente="C001", destino="Miami",
-                             items=[{"sku": "ROS-002", "cantidad": 2000}, {"sku": "GYP-001", "cantidad": 1000}]))]
+                             items=[{"sku": "ROS-002", "cantidad": 2000}, {"sku": "ROS-004", "cantidad": 1000}]))]
 
 
 def _botones_al_supervisor(api):
@@ -161,10 +238,11 @@ def _botones_al_supervisor(api):
 
 def test_pedido_valido_va_al_supervisor_y_se_aprueba_con_el_boton():
     client, api, _ = _cliente(_guion_pedido())
-    _post(client, _payload(CLIENTE_WA, "Queremos pedir 2000 tallos de rosa Freedom 60 cm y 1000 de gypsophila"))
-    assert api.textos_a(CLIENTE_WA) == [MSG_PENDIENTE]
+    _post(client, _payload(CLIENTE_WA, "Queremos pedir 2000 tallos de rosa Freedom 60 cm y 1000 de rosa Explorer 60 cm"))
+    (resumen,) = api.textos_a(CLIENTE_WA)
+    assert "pendiente de aprobación" in resumen and "2000 tallos (80 bonches)" in resumen and "*Total: $817.00*" in resumen
     (aviso,) = _botones_al_supervisor(api)
-    assert "Total: $1,235.00" in aviso[2] and "Bloom Imports LLC" in aviso[2]
+    assert "Total: $817.00" in aviso[2] and "Bloom Imports LLC" in aviso[2]
     assert len(ERPClient().listar_pedidos()) == 3, "nada se escribe antes de la aprobación"
 
     id_aprobar = next(i for i, _t in aviso[3] if i.startswith("aprobar:"))
@@ -172,14 +250,14 @@ def test_pedido_valido_va_al_supervisor_y_se_aprueba_con_el_boton():
 
     pedidos = ERPClient().listar_pedidos()
     nuevo = next(p for p in pedidos if p["creado_por"] == "agente-ia")
-    assert nuevo["aprobado_por"] == "supervisor María" and nuevo["total"] == 1235.0
+    assert nuevo["aprobado_por"] == "supervisor María" and nuevo["total"] == 817.0
     assert nuevo["id"] in api.textos_a(CLIENTE_WA)[-1]
     assert nuevo["id"] in api.textos_a(SUPERVISOR_WA)[-1]
 
 
 def test_rechazo_con_el_boton_no_escribe_en_el_erp():
     client, api, _ = _cliente(_guion_pedido())
-    _post(client, _payload(CLIENTE_WA, "Queremos pedir 2000 tallos de rosa Freedom 60 cm y 1000 de gypsophila"))
+    _post(client, _payload(CLIENTE_WA, "Queremos pedir 2000 tallos de rosa Freedom 60 cm y 1000 de rosa Explorer 60 cm"))
     id_rechazar = next(i for i, _t in _botones_al_supervisor(api)[0][3] if i.startswith("rechazar:"))
     _post(client, _payload(SUPERVISOR_WA, boton=id_rechazar))
     assert len(ERPClient().listar_pedidos()) == 3
@@ -188,7 +266,7 @@ def test_rechazo_con_el_boton_no_escribe_en_el_erp():
 
 def test_solo_un_supervisor_puede_aprobar():
     client, api, _ = _cliente(_guion_pedido())
-    _post(client, _payload(CLIENTE_WA, "Queremos pedir 2000 tallos de rosa Freedom 60 cm y 1000 de gypsophila"))
+    _post(client, _payload(CLIENTE_WA, "Queremos pedir 2000 tallos de rosa Freedom 60 cm y 1000 de rosa Explorer 60 cm"))
     id_aprobar = next(i for i, _t in _botones_al_supervisor(api)[0][3] if i.startswith("aprobar:"))
     _post(client, _payload(CLIENTE_WA, boton=id_aprobar))     # el cliente reenvía el id del botón
     assert len(ERPClient().listar_pedidos()) == 3
@@ -196,7 +274,7 @@ def test_solo_un_supervisor_puede_aprobar():
 
 def test_boton_tocado_dos_veces_no_duplica_el_pedido():
     client, api, _ = _cliente(_guion_pedido())
-    _post(client, _payload(CLIENTE_WA, "Queremos pedir 2000 tallos de rosa Freedom 60 cm y 1000 de gypsophila"))
+    _post(client, _payload(CLIENTE_WA, "Queremos pedir 2000 tallos de rosa Freedom 60 cm y 1000 de rosa Explorer 60 cm"))
     id_aprobar = next(i for i, _t in _botones_al_supervisor(api)[0][3] if i.startswith("aprobar:"))
     _post(client, _payload(SUPERVISOR_WA, boton=id_aprobar))
     _post(client, _payload(SUPERVISOR_WA, boton=id_aprobar))
@@ -206,15 +284,16 @@ def test_boton_tocado_dos_veces_no_duplica_el_pedido():
 
 def test_cliente_escribe_mientras_espera_aprobacion():
     client, api, llm = _cliente(_guion_pedido())
-    _post(client, _payload(CLIENTE_WA, "Queremos pedir 2000 tallos de rosa Freedom 60 cm y 1000 de gypsophila"))
+    _post(client, _payload(CLIENTE_WA, "Queremos pedir 2000 tallos de rosa Freedom 60 cm y 1000 de rosa Explorer 60 cm"))
     _post(client, _payload(CLIENTE_WA, "¿ya está?"))
     assert api.textos_a(CLIENTE_WA)[-1] == MSG_YA_PENDIENTE and llm.llamadas == 1
 
 
 def test_supervisor_fuera_de_la_ventana_de_24h_queda_auditado():
     client, api, _ = _cliente(_guion_pedido(), api=APIFalsa(falla_botones=True))
-    _post(client, _payload(CLIENTE_WA, "Queremos pedir 2000 tallos de rosa Freedom 60 cm y 1000 de gypsophila"))
-    assert api.textos_a(CLIENTE_WA) == [MSG_PENDIENTE]
+    _post(client, _payload(CLIENTE_WA, "Queremos pedir 2000 tallos de rosa Freedom 60 cm y 1000 de rosa Explorer 60 cm"))
+    (resumen,) = api.textos_a(CLIENTE_WA)
+    assert "pendiente de aprobación" in resumen and "2000 tallos (80 bonches)" in resumen and "*Total: $817.00*" in resumen
     assert "AVISO_SUPERVISOR_FALLIDO" in [a["accion"] for a in ERPClient().auditoria(10)]
 
 

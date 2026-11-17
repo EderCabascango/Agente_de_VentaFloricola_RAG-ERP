@@ -13,7 +13,8 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
-from collections import OrderedDict, defaultdict
+import time
+from collections import OrderedDict, defaultdict, deque
 from typing import Optional
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
@@ -22,20 +23,22 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.types import Command
 
 from src import config as cfg
-from src.erp_client import ERPClient, registrar_auditoria
-from src.graph import LLMNoDisponible, build_graph, pendiente_de_aprobacion, texto_de
-from src.whatsapp import formatear_para_whatsapp, hilo_de, normalizar_numero
+from src.erp_client import ERPClient, registrar_auditoria, registrar_cliente_whatsapp, registrar_mensaje
+from src.graph import LLMNoDisponible, build_graph, pendiente_de_aprobacion, texto_de, traza_resumida
+from src.whatsapp import formatear_para_whatsapp, hilo_de, normalizar_numero, resumen_pedido_pendiente
 from src.whatsapp_api import (AjustesWhatsApp, ErrorWhatsApp, MensajeEntrante, WhatsAppAPI, extraer_mensajes,
                               firma_valida)
 
 log = logging.getLogger("whatsapp")
 
-EMPRESA = "Rosaflor Andina"
+EMPRESA = cfg.EMPRESA
 CONVERSACIONES_DB = cfg.ROOT / "conversaciones.db"
 
 MSG_SOLO_TEXTO = "Por ahora solo puedo leer mensajes de texto 🌹. ¿Me escribe su consulta?"
 MSG_NO_REGISTRADO = (f"¡Hola! Gracias por escribir a {EMPRESA} 🌹. Su número todavía no está registrado como "
                      "cliente; un asesor comercial le escribirá por aquí para atenderle.")
+MSG_DEMASIADOS = ("Está escribiendo muy rápido 🌷. Deme un momento para responderle y envíe sus consultas "
+                  "con un poco más de calma.")
 MSG_PENDIENTE = ("Su pedido pasó las validaciones automáticas y está *pendiente de aprobación* de un supervisor. "
                  "Le confirmo por aquí en cuanto quede registrado. 🌷")
 MSG_YA_PENDIENTE = ("Todavía tiene un pedido *esperando la aprobación* del supervisor. Le escribo apenas lo revise; "
@@ -49,7 +52,10 @@ def _resumen_para_supervisor(v: dict, wa_cliente: str) -> str:
         f"• {l['sku']} {l['nombre']}: {l['cantidad']} tallos · finca {l['bodega']} · ${l['precio_unitario']:.2f} "
         f"· {l['descuento_pct']:g}% = ${l['subtotal']:,.2f}" for l in v["lineas"])
     ok = sum(1 for ch in v["checks"] if ch["ok"])
-    texto = (f"🌹 *Pedido pendiente de aprobación*\n"
+    nuevo = ("🆕 *Cliente nuevo*, registrado por WhatsApp: sin historial ni descuento propio, "
+             f"crédito de prueba ${c['credito_disponible']:,.2f}. Confirme el pago antes de aprobar.\n"
+             if c.get("segmento") == "Nuevo" else "")
+    texto = (f"🌹 *Pedido pendiente de aprobación*\n{nuevo}"
              f"Cliente: {c['razon_social']} ({c['pais']}) · ID {c['id']}\n"
              f"WhatsApp: +{wa_cliente}\nDestino: {v.get('destino') or '—'}\n\n{lineas}\n\n"
              f"*Total: ${v['total']:,.2f}* (FOB Quito)\n"
@@ -71,6 +77,8 @@ class CanalWhatsApp:
         self._locks: defaultdict[str, threading.Lock] = defaultdict(threading.Lock)
         self._vistos: OrderedDict[str, None] = OrderedDict()   # Meta reintenta: se ignoran ids repetidos
         self._lock_vistos = threading.Lock()
+        self._ventanas: defaultdict[str, deque] = defaultdict(deque)   # mensajes por número en el último minuto
+        self._tope_avisado: dict[str, float] = {}
 
     # ------------------------------------------------------------------ utilidades
     def ya_visto(self, message_id: str) -> bool:
@@ -89,13 +97,42 @@ class CanalWhatsApp:
             log.error("No se pudo enviar a %s: %s", para, e)
             registrar_auditoria("canal-whatsapp", "ENVIO_FALLIDO", {"para": para, "error": str(e)[:300]}, "Error API")
 
-    def cliente_de(self, wa_id: str) -> Optional[dict]:
-        """El número identifica al cliente: mapa del piloto (.env), luego el ERP, luego el cliente por defecto."""
+    def cliente_de(self, wa_id: str, nombre: str = "") -> Optional[dict]:
+        """El número identifica al cliente: mapa del piloto (.env), luego el ERP, luego el cliente por defecto.
+
+        Si nada de eso aplica, el número se registra como cliente nuevo: cualquiera que escriba recibe
+        atención, sin tener que agregar su número antes (se desactiva con WHATSAPP_REGISTRAR_NUEVOS=0).
+        """
         cid = (self.ajustes.clientes or {}).get(wa_id)
         cliente = self.erp.get_cliente(cid) if cid else self.erp.get_cliente(wa_id)
         if not cliente and self.ajustes.cliente_por_defecto:
             cliente = self.erp.get_cliente(self.ajustes.cliente_por_defecto)
+        if not cliente and self.ajustes.registrar_nuevos:
+            try:
+                cliente = self.erp.get_cliente(registrar_cliente_whatsapp(wa_id, nombre)["id"])
+            except Exception:  # noqa: BLE001 — si no se pudo registrar, se deriva a un asesor como antes
+                log.exception("No se pudo registrar al cliente nuevo +%s", wa_id)
         return cliente
+
+    def _excede_tope(self, wa_id: str) -> bool:
+        """Tope de mensajes por minuto y por número. Abrir el canal a todos no debe permitir que alguien
+        agote la cuota del LLM: lo que pasa del tope se ignora (se avisa una vez por minuto)."""
+        tope = self.ajustes.max_mensajes_minuto
+        if tope <= 0:
+            return False
+        ahora = time.monotonic()
+        ventana = self._ventanas[wa_id]
+        while ventana and ahora - ventana[0] > 60:
+            ventana.popleft()
+        if len(ventana) >= tope:
+            if ahora - self._tope_avisado.get(wa_id, -1e9) > 60:
+                self._tope_avisado[wa_id] = ahora
+                self._enviar(wa_id, MSG_DEMASIADOS)
+                registrar_auditoria("canal-whatsapp", "TOPE_MENSAJES", {"wa_id": wa_id, "tope": tope},
+                                    "Mensajes ignorados por exceso")
+            return True
+        ventana.append(ahora)
+        return False
 
     def _conf(self, hilo: str) -> dict:
         return {"configurable": {"thread_id": hilo}}
@@ -134,7 +171,9 @@ class CanalWhatsApp:
         self._enviar(msg.de, "Listo, reinicié su conversación de prueba. Escríbame como cliente para empezar de cero. 🌹")
 
     def _mensaje_cliente(self, msg: MensajeEntrante) -> None:
-        cliente = self.cliente_de(msg.de)
+        if self._excede_tope(msg.de):
+            return
+        cliente = self.cliente_de(msg.de, msg.nombre)
         if not cliente:
             registrar_auditoria("canal-whatsapp", "NUMERO_NO_REGISTRADO", {"wa_id": msg.de, "nombre": msg.nombre},
                                 "Derivado a asesor")
@@ -147,17 +186,30 @@ class CanalWhatsApp:
                 return
             try:
                 self.grafo.invoke({"messages": [HumanMessage(content=msg.texto, id=f"wa-{msg.id}")],
-                                   "cliente_canal": cliente}, self._conf(hilo))
+                                   "cliente_canal": cliente, "wa_id": msg.de}, self._conf(hilo))
             except LLMNoDisponible as e:
                 log.error("LLM no disponible: %s", e)
                 self._enviar(msg.de, MSG_ERROR)
                 return
             pend = pendiente_de_aprobacion(self.grafo, hilo)
             if pend:
-                self._enviar(msg.de, MSG_PENDIENTE)
+                # Aprobación por WhatsApp (modo "interrupt"): el cliente ve precio, cantidad y total
+                respuesta = resumen_pedido_pendiente(pend["validacion"])
+                self._enviar(msg.de, respuesta)
                 self._notificar_supervisores(pend["validacion"], hilo, msg.de)
             else:
-                self._enviar(msg.de, self._respuesta(hilo))
+                respuesta = self._respuesta(hilo)
+                self._enviar(msg.de, respuesta)
+            self._guardar_conversacion(msg, respuesta, hilo)
+
+    def _guardar_conversacion(self, msg: MensajeEntrante, respuesta: str, hilo: str) -> None:
+        """La plataforma muestra qué escribió el cliente, qué respondió el agente y qué herramientas usó."""
+        try:
+            st = self.grafo.get_state(self._conf(hilo)).values
+            registrar_mensaje(msg.de, "cliente", msg.texto)
+            registrar_mensaje(msg.de, "agente", respuesta, traza_resumida(st.get("traza"), st.get("turno")))
+        except Exception:  # noqa: BLE001 — guardar la conversación nunca debe romper la respuesta
+            log.exception("No se pudo guardar la conversación de %s", msg.de)
 
     def _notificar_supervisores(self, v: dict, hilo: str, wa_cliente: str) -> None:
         texto = _resumen_para_supervisor(v, wa_cliente)

@@ -14,6 +14,9 @@ sys.path.insert(0, str(ROOT / "tests"))
 _TMP = Path(tempfile.mkdtemp(prefix="erp_test_"))
 os.environ["ERP_DB_PATH"] = str(_TMP / "erp_test.db")
 os.environ["LLM_FALLBACK_PROVIDER"] = ""
+os.environ["ERP_URL"] = ""      # los tests nunca tocan el ERP de la nube
+os.environ["ERP_TOKEN"] = ""
+os.environ["VARIEDADES_ARCHIVO"] = ""   # los tests usan el catálogo corto de demostración, no el del cliente
 
 import pytest  # noqa: E402
 

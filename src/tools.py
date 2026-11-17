@@ -34,14 +34,14 @@ def buscar_politicas(pregunta: str) -> dict:
 
 
 @tool
-def ver_catalogo(categoria: Optional[str] = None) -> dict:
-    """Catálogo de flores. Sin categoría: resumen de categorías, variedades y rango de precios por tallo. Con categoría (Rosas, Rellenos, Claveles, Flores de verano): sus flores con precio."""
-    return _erp.catalogo_resumen(categoria)
+def ver_catalogo(buscar: Optional[str] = None) -> dict:
+    """Catálogo de rosas. Sin parámetro: cuántas variedades hay, largos y rango de precios por tallo. Con buscar (parte del nombre o una letra): las variedades que coinciden con sus largos y precios."""
+    return _erp.catalogo_resumen(buscar)
 
 
 @tool
 def buscar_producto(texto: str) -> dict:
-    """Busca flores por variedad, color, largo o SKU."""
+    """Busca rosas por variedad, largo o SKU."""
     res = _erp.buscar_productos(texto, limite=3)
     return {"resultados": [{k: p[k] for k in ("sku", "nombre", "precio_unitario", "unidad")} for p in res]}
 
@@ -109,6 +109,26 @@ def preparar_borrador_pedido(cliente: str, items: list[ItemBorrador], destino: O
     return {"estado": "BORRADOR_RECIBIDO"}
 
 
+@tool
+def guardar_datos_despacho(pedido_id: str, contacto_nombre: str, contacto_telefono: str, direccion: str, ciudad: str,
+                           fecha_entrega: str, metodo_pago: str, wa_id: Optional[str] = None) -> dict:
+    """Guarda los datos de entrega y pago de un pedido ya ACEPTADO para que un asesor los valide. Usa solo lo que el cliente dijo. pedido_id exacto del contexto; fecha_entrega AAAA-MM-DD; metodo_pago: transferencia, credito, contra_entrega o efectivo. No llenes wa_id."""
+    from .erp_client import guardar_datos_despacho as guardar
+    from .erp_http import ERPNoDisponible
+
+    datos = {"contacto_nombre": contacto_nombre, "contacto_telefono": contacto_telefono, "direccion": direccion,
+             "ciudad": ciudad, "fecha_entrega": fecha_entrega, "metodo_pago": metodo_pago}
+    faltan = [k.replace("contacto_", "").replace("_", " ") for k, x in datos.items() if not str(x or "").strip()]
+    if faltan:  # el modelo no puede mandar campos en blanco: se le devuelve qué pedir
+        return {"error": "Faltan datos del cliente: " + ", ".join(faltan) + ". Pídeselos; no los inventes."}
+    try:
+        r = guardar(wa_id or "", pedido_id, datos)
+    except ERPNoDisponible as e:
+        return {"error": str(e)}
+    return {"guardado": True, "pedido_id": pedido_id, "estado": r.get("estado"), "datos": datos,
+            "siguiente_paso": "Un asesor valida estos datos; el cliente recibe el aviso por WhatsApp."}
+
+
 TOOLS = [buscar_politicas, calcular_cotizacion, preparar_borrador_pedido, consultar_inventario,
-         consultar_cliente, buscar_producto, ver_catalogo]
+         consultar_cliente, buscar_producto, ver_catalogo, guardar_datos_despacho]
 TOOLS_BY_NAME = {t.name: t for t in TOOLS}

@@ -31,7 +31,7 @@ PATRONES_FUERA_DE_ALCANCE = [
 PATRONES_DOMINIO = (
     r"pedido|producto|precio|stock|inventario|descuento|entrega|despacho|credito|factura|reclamo|sku|"
     r"tallo|bonche|caja|finca|cotiz|cliente|compra|envio|vuelo|flete|politica|temporada|valentin|"
-    r"rosa|flor|clavel|gypsophila|hypericum|limonium|alstroemeria|crisantemo|girasol|florero|hidrat|"
+    r"rosa|flor|florero|hidrat|catalogo|"
     r"variedad|color|largo"
 )
 
@@ -59,6 +59,7 @@ class ResultadoGuardrail:
 _VERBO_PEDIDO = re.compile(r"\b(pedir|pedido de|hacer un pedido|realizar un pedido|comprar|ordenar|encargar|confirm\w*|procedan|procede)\b")
 _QUIERO = re.compile(r"\b(quiero|queremos|quisiera|quisieramos|necesito|necesitamos|deseo|deseamos|requerimos)\b")
 _CONSULTA = re.compile(r"\?|\b(precio|cuanto|cuesta|cotiza\w*|aplica|saber)\b")
+_NEGACION = re.compile(r"\b(no (la |lo |las |los )?(quiero|queremos|necesito|necesitamos|deseo)|ya no|no gracias|mejor no|cancel\w*)\b")
 _COTIZA = re.compile(r"\b(descuento|precio|cuanto|cuesta|cotiza\w*)\b")
 
 
@@ -81,6 +82,8 @@ def detectar_intencion(texto: str) -> str | None:
     t = _normalizar(texto)
     if not re.search(r"\d", t):
         return None
+    if _NEGACION.search(t):
+        return None  # "no la quiero en 50 cm" no es un pedido
     if _VERBO_PEDIDO.search(t) or (_QUIERO.search(t) and not _CONSULTA.search(t)):
         return "pedido"
     if _COTIZA.search(t):

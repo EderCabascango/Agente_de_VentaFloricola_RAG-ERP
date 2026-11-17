@@ -10,6 +10,4 @@
 ## Vida en florero
 
 - Rosas: 10 a 14 días con agua limpia, cambiada cada 2 días.
-- Gypsophila: 7 a 10 días.
-- Claveles: 14 a 21 días.
 - Retire las hojas que quedan bajo el agua para evitar bacterias.

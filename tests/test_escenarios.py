@@ -38,10 +38,10 @@ def test_escenario_1_consulta_compleja_con_datos_y_politica_citada():
     guion = [
         llamar(tool_call("calcular_cotizacion", producto="rosa freedom roja 60 cm", cantidad=5000, cliente=RUC),
                tool_call("buscar_politicas", pregunta="tiempo de envío a miami")),
-        responder("Para 5000 tallos aplica **8%** de descuento: total neto $2,300.00 (FOB Quito). "
+        responder("Para 5000 tallos aplica **8%** de descuento: total neto $1,288.00. "
                   "Llegan a Miami en 48 a 72 horas [tiempos_envio.md]."),
     ]
-    g, conf, _ = correr(guion, "¿Qué descuento aplica para 5000 tallos de rosa Freedom y en cuánto llegan a Miami?")
+    g, conf, _ = correr(guion, "¿Qué descuento aplica para 5000 tallos de rosa Freedom de 60 cm y en cuánto llegan a Miami?")
     rf = estado(g, conf)["respuesta_final"]
     assert rf["nivel_confianza"] == "alta"
     assert not rf["escalar_a_asesor"]
@@ -54,22 +54,22 @@ def test_escenario_1_consulta_compleja_con_datos_y_politica_citada():
 def _guion_pedido_valido():
     return [
         llamar(tool_call("preparar_borrador_pedido", cliente=RUC, destino="Miami",
-                         items=[{"sku": "ROS-002", "cantidad": 2000}, {"sku": "GYP-001", "cantidad": 1000}])),
+                         items=[{"sku": "ROS-002", "cantidad": 2000}, {"sku": "ROS-004", "cantidad": 1000}])),
     ]
 
 
 def test_escenario_2_pedido_valido_espera_aprobacion_y_luego_se_escribe():
     erp = ERPClient()
-    g, conf, _ = correr(_guion_pedido_valido(), "Queremos 2000 tallos de rosa Freedom y 1000 de gypsophila")
+    g, conf, _ = correr(_guion_pedido_valido(), "Queremos 2000 tallos de rosa Freedom y 1000 de rosa Explorer")
     pend = pendiente_de_aprobacion(g, conf["configurable"]["thread_id"])
-    assert pend and pend["validacion"]["aprobado"] and pend["validacion"]["total"] == 1235.0
+    assert pend and pend["validacion"]["aprobado"] and pend["validacion"]["total"] == 817.0
     assert len(erp.listar_pedidos()) == 3, "Nada se escribe en el ERP antes de la aprobación humana"
 
     g.invoke(Command(resume={"accion": "aprobar", "usuario": "supervisor.maria"}), conf)
     pedidos = erp.listar_pedidos()
     assert len(pedidos) == 4
     nuevo = next(p for p in pedidos if p["creado_por"] == "agente-ia")
-    assert nuevo["aprobado_por"] == "supervisor.maria" and nuevo["total"] == 1235.0
+    assert nuevo["aprobado_por"] == "supervisor.maria" and nuevo["total"] == 817.0
     stock = {s["bodega"]: s for s in erp.inventario("ROS-002")}
     assert stock["CAY"]["stock_disponible"] == 10000 and stock["CAY"]["stock_reservado"] == 2000
     assert "PEDIDO_ESCRITO_ERP" in acciones_auditadas()
@@ -98,11 +98,11 @@ def test_escenario_2c_editar_cantidad_revalida():
 def test_escenario_3_validador_bloquea_y_agente_propone_alternativa():
     guion = [
         llamar(tool_call("preparar_borrador_pedido", cliente=RUC, destino="Miami",
-                         items=[{"producto": "rosa freedom roja 70 cm", "cantidad": 20000, "descuento_pct": 25}])),
+                         items=[{"producto": "rosa freedom roja 70 cm", "cantidad": 40000, "descuento_pct": 25}])),
         responder("El pedido no pasó la validación: en Cayambe hay 4000 tallos y su descuento máximo es 10%. "
-                  "Le propongo 4000 tallos desde CAY con 5% por $2,280.00. ¿Confirma?"),
+                  "Le propongo 4000 tallos desde CAY con 5% por $1,254.00. ¿Confirma?"),
     ]
-    g, conf, llm = correr(guion, "20000 tallos de rosa Freedom 70 cm con 25% de descuento")
+    g, conf, llm = correr(guion, "40000 tallos de rosa Freedom 70 cm con 25% de descuento")
     st = estado(g, conf)
     assert pendiente_de_aprobacion(g, conf["configurable"]["thread_id"]) is None
     assert not st["validacion"]["aprobado"]

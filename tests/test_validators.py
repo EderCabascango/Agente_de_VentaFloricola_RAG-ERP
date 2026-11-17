@@ -10,9 +10,9 @@ def _check(res, nombre, sku=None):
 
 def test_pedido_valido_pasa_y_aplica_descuento_de_politica():
     r = validar_borrador({"cliente": CLIENTE, "destino": "Miami",
-                          "items": [{"sku": "ROS-002", "cantidad": 2000}, {"sku": "GYP-001", "cantidad": 1000}]})
+                          "items": [{"sku": "ROS-002", "cantidad": 2000}, {"sku": "ROS-004", "cantidad": 1000}]})
     assert r.aprobado
-    assert r.total == 1235.00  # 2000*0.50*0.95 + 1000*0.30*0.95
+    assert r.total == 817.00  # 2000*0.28*0.95 + 1000*0.30*0.95
     assert {l.bodega for l in r.lineas} == {"CAY"}
     assert all(c.ok for c in r.checks)
 
@@ -54,7 +54,7 @@ def test_finca_pedida_por_nombre():
 def test_precio_siempre_sale_del_erp():
     r = validar_borrador({"cliente": CLIENTE, "items": [{"sku": "ROS-002", "cantidad": 100, "precio_unitario": 0.10}]})
     assert r.aprobado
-    assert r.lineas[0].precio_unitario == 0.50
+    assert r.lineas[0].precio_unitario == 0.28
     assert r.correcciones and "reemplazado" in r.correcciones[0]
 
 
@@ -74,8 +74,8 @@ def test_descuento_limitado_por_cliente():
 
 
 def test_credito_insuficiente_bloquea():
-    # Fleurs du Marché: crédito disponible 800
-    r = validar_borrador({"cliente": "C002", "items": [{"sku": "ROS-002", "cantidad": 2000}]})
+    # Fleurs du Marché: crédito disponible 800; 4000 tallos × 0.28 × 0.95 = 1064
+    r = validar_borrador({"cliente": "C002", "items": [{"sku": "ROS-002", "cantidad": 4000}]})
     assert not r.aprobado
     assert not _check(r, "credito_disponible").ok
 

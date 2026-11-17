@@ -1,6 +1,6 @@
 # Agente de ventas por WhatsApp para una florícola (RAG + aprobación humana)
 
-Prototipo de un agente con **LangChain + LangGraph** que atiende por chat a importadores y floristerías de una florícola exportadora: cotiza rosas y flores de verano, revisa disponibilidad por finca, toma pedidos y responde dudas de envíos, temporadas, reclamos y cuidado de la flor.
+Prototipo de un agente con **LangChain + LangGraph** que atiende por chat a los clientes de una finca de rosas (Grupo CFG): cotiza **solo rosas**, revisa disponibilidad por finca, toma pedidos y responde dudas de envíos, temporadas, reclamos y cuidado de la flor.
 
 Se puede mostrar de dos formas: en la **demo de Streamlit**, con un chat que imita WhatsApp, o en **WhatsApp real** con la Cloud API de Meta (ver [Canal WhatsApp](#canal-whatsapp-real)). En los dos casos el ERP es sintético.
 
@@ -60,7 +60,7 @@ flowchart TD
 
 | Dato | Valor |
 |---|---|
-| Catálogo | 25 productos: 15 rosas (variedad, color y largo), gypsophila, hypericum, limonium, claveles y flores de verano |
+| Catálogo | **Solo rosas**: las 203 variedades de Grupo CFG (lista del cliente, no incluida en el repositorio) en largos de 40 a 80 cm. Los precios (entre $0,18 y $0,39 por tallo) y el stock son **inventados**, de demostración. Sin esa lista el repositorio trae 12 variedades de demostración |
 | Unidad de venta | Tallo, en **bonches de 25**; **caja completa = 400 tallos**. El cliente puede pedir en tallos, bonches o cajas y el código convierte. Precios FOB Quito en USD por tallo |
 | Fincas con cuarto frío | CAY (Cayambe), TAB (Tabacundo), LAT (Latacunga) |
 | Clientes | 6 importadores y floristerías de EE. UU., Francia, Países Bajos, Rusia y Ecuador, cada uno con su número de WhatsApp |
@@ -94,8 +94,8 @@ En la barra lateral eliges **qué cliente escribe** (su número de WhatsApp lo i
 | # | Escenario | Qué demuestra |
 |---|---|---|
 | 1 | Cotización (5.000 tallos de rosa Freedom + tiempo a Miami) | Las cifras salen del ERP y la política de envíos se cita |
-| 2 | Pedido válido (rosas + gypsophila) | Validador en verde → aprobación humana → pedido escrito en el ERP |
-| 3 | Pedido con error (20.000 tallos con 25% de descuento) | Bloqueo por stock, descuento y crédito, con alternativas calculadas por el código |
+| 2 | Pedido válido (dos variedades de rosa) | Validador en verde → aprobación humana → pedido escrito en el ERP |
+| 3 | Pedido con error (40.000 tallos con 25% de descuento) | Bloqueo por stock, descuento y crédito, con alternativas calculadas por el código |
 | 4 | Cuidado de la flor | Respuesta solo con la guía de postcosecha (RAG), con cita |
 | 5 | Pregunta sin datos (precio de San Valentín del próximo año) | Dice "no sé" y escala a un asesor |
 | 6 | Intento de inyección | Bloqueo por reglas: 0 tokens, 0 s, queda en la auditoría |
@@ -119,7 +119,9 @@ python -m uvicorn webhook:crear_app --factory --host 127.0.0.1 --port 8000
 | Formato | [`src/whatsapp.py`](src/whatsapp.py) | Markdown → formato WhatsApp, número → conversación |
 | Memoria | `conversaciones.db` | Checkpointer SQLite: las conversaciones y los pedidos pendientes sobreviven a reinicios |
 
-- **El número identifica al cliente:** el webhook busca el número en el ERP (o en `WHATSAPP_CLIENTES` para los testers del piloto) y el LLM recibe el ID del cliente sin preguntarlo.
+- **El número identifica al cliente:** el webhook busca el número en el ERP (o en `WHATSAPP_CLIENTES`) y el LLM recibe el ID del cliente sin preguntarlo.
+- **Responde a cualquier número, sin registrarlo antes:** si el número no está en el ERP, el canal lo registra solo como **cliente nuevo** (segmento "Nuevo", sin descuento propio y con un crédito de prueba de $2.000, configurables con `CLIENTE_NUEVO_LIMITE_CREDITO` y `CLIENTE_NUEVO_DESCUENTO_MAX`). Quien lo registra es el canal, no el agente. Cada pedido de un cliente nuevo llega al supervisor marcado como "Cliente nuevo". Con `WHATSAPP_REGISTRAR_NUEVOS=0` vuelve al comportamiento anterior (el desconocido espera a un asesor).
+- **Tope por número:** 15 mensajes por minuto (`WHATSAPP_MAX_MENSAJES_MINUTO`, 0 = sin tope). Lo que pasa del tope se ignora y se avisa una vez, para que nadie agote la cuota del LLM.
 - **Aprobación por WhatsApp:** cuando el validador aprueba un borrador, el supervisor recibe el resumen con botones **Aprobar / Rechazar**. Solo los números de `WHATSAPP_SUPERVISORES` pueden decidir, y un botón tocado dos veces no duplica el pedido.
 - **Reiniciar una prueba:** el supervisor escribe `/reiniciar` y se borra su conversación (y un pedido pendiente) para empezar de cero.
 - **Mismo ERP que la demo:** los pedidos que entran por WhatsApp aparecen en el panel ERP de Streamlit.

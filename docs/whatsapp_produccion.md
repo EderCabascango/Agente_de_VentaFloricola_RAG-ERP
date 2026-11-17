@@ -63,7 +63,9 @@ WHATSAPP_CLIENTES=+593 99 111 2233=C001
 
 - **Supervisores:** números que reciben los pedidos con botones Aprobar / Rechazar. Solo ellos pueden aprobar.
 - **Clientes:** el ERP es sintético, así que asigna a cada tester un cliente del ERP (`C001` Bloom Imports, `C003` Tulp & Roos, etc., ver `seed.py`). Así hereda su crédito y su descuento.
-- `WHATSAPP_CLIENTE_POR_DEFECTO=C001` atiende a cualquier número desconocido como ese cliente (útil en una demo abierta). Vacío: el número desconocido recibe "un asesor le escribirá" y queda en la auditoría.
+- **Cualquier número recibe atención.** Un número que no está en el ERP se registra solo como cliente nuevo (sin descuento propio y con un crédito de prueba), y su pedido igual pasa por el validador y la aprobación del supervisor, que lo ve marcado como "Cliente nuevo". `WHATSAPP_REGISTRAR_NUEVOS=0` lo desactiva: el desconocido recibe "un asesor le escribirá" y queda en la auditoría.
+- `WHATSAPP_CLIENTE_POR_DEFECTO=C001` (opcional) atiende a los desconocidos como ese cliente del ERP, en vez de registrarlos. No lo recomiendo: todos compartirían su crédito y su descuento.
+- `WHATSAPP_MAX_MENSAJES_MINUTO=15` limita los mensajes por número para proteger la cuota del LLM.
 
 ## 6. Túnel con ngrok (URL fija y gratis)
 
@@ -103,7 +105,7 @@ Comprueba que responde: abre `https://rosaflor-demo.ngrok-free.app/salud` y debe
 ## 9. Probar
 
 1. Desde el celular del tester escribe al número del bot: "¿Qué descuento aplica para 5000 tallos de rosa Freedom roja de 60 cm?"
-2. Pide un pedido: "Queremos pedir 2000 tallos de rosa Freedom roja de 60 cm y 1000 de gypsophila, destino Miami".
+2. Pide un pedido: "Queremos pedir 2000 tallos de rosa Freedom de 60 cm y 1000 de rosa Explorer de 60 cm, destino Miami".
 3. El supervisor recibe el resumen con **✅ Aprobar** / **✖️ Rechazar**. Al aprobar, el cliente recibe el número de pedido.
 4. El pedido aparece en el panel **ERP** de la demo de Streamlit (`demo.bat`), que usa la misma base.
 

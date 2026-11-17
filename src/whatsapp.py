@@ -54,3 +54,18 @@ def normalizar_numero(numero: str) -> str:
 def hilo_de(numero: str) -> str:
     """thread_id de LangGraph para un número: una conversación con memoria por cliente."""
     return f"wa-{normalizar_numero(numero)}"
+
+
+def resumen_pedido_pendiente(v: dict, pedido_id: str | None = None) -> str:
+    """Lo que ve el cliente cuando su pedido pasó las validaciones: precio, cantidad y total.
+
+    Se arma con el resultado del validador (precios del ERP, cuentas hechas por el código): el modelo no escribe cifras.
+    """
+    lineas = []
+    for l in v["lineas"]:
+        desc = f", {l['descuento_pct']:g}% de descuento" if l["descuento_pct"] else ""
+        lineas.append(f"• {l['cantidad']} tallos ({l['cantidad'] // 25} bonches) {l['nombre']}: "
+                      f"${l['precio_unitario']:.2f} c/u{desc} = ${l['subtotal']:,.2f}")
+    etiqueta = f" {pedido_id}" if pedido_id else ""
+    return (f"Su pedido{etiqueta} pasó las validaciones y quedó *pendiente de aprobación*:\n" + "\n".join(lineas)
+            + f"\n*Total: ${v['total']:,.2f}*\nLe confirmo por aquí apenas lo aprueben. 🌷")
