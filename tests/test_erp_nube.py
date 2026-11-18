@@ -33,6 +33,7 @@ class ERPFalso:
         self.caido_en: str | None = None
         self.despachos: list[dict] = []          # lo que el ERP dice que está por despachar
         self.rechazo_despacho: str | None = None
+        self.agente_activo = True
 
     def __call__(self, metodo, ruta, params=None, cuerpo=None):
         self.llamadas.append((metodo, ruta))
@@ -63,6 +64,8 @@ class ERPFalso:
         if ruta == "/api/erp/mensajes":
             self.mensajes.append(cuerpo)
             return {"ok": True}
+        if ruta == "/api/erp/agente":
+            return {"ok": True, "activo": self.agente_activo}
         if ruta == "/api/erp/despachos/pendientes":
             return {"ok": True, "despachos": self.despachos}
         if ruta == "/api/erp/despachos":
@@ -232,3 +235,31 @@ def test_el_contexto_trae_el_enlace_del_formulario_y_manda_a_usarlo(nube):
     nube.despachos = [{"pedido_id": "PED-0007", "total": 120.0, "destino": "Quito", "estado": "FALTAN_DATOS", "enlace": enlace}]
     texto, pedir = _contexto_despachos(WA)
     assert pedir and enlace in texto and "formulario" in texto.lower() and "uno por uno" in texto
+
+
+def test_interruptor_de_la_plataforma_apaga_el_agente(nube):
+    from src import erp_client
+    erp_client._AGENTE.update(activo=None, t=0.0)
+    assert erp_client.agente_activo_nube() is True
+    nube.agente_activo = False
+    assert erp_client.agente_activo_nube() is True      # el valor se guarda 10 s
+    erp_client._AGENTE["t"] = 0.0
+    assert erp_client.agente_activo_nube() is False
+    nube.caido_en = "/api/erp/agente"
+    erp_client._AGENTE["t"] = 0.0
+    assert erp_client.agente_activo_nube() is False     # ERP caído: se usa el último valor conocido
+
+
+def test_interruptor_sin_lectura_previa_y_erp_caido_deja_callado_al_agente(nube):
+    from src import erp_client
+    erp_client._AGENTE.update(activo=None, t=0.0)
+    nube.caido_en = "/api/erp/agente"
+    assert erp_client.agente_activo_nube() is False
+
+
+def test_el_webhook_no_responde_si_la_plataforma_apago_el_agente(nube):
+    import webhook
+    from src import erp_client
+    erp_client._AGENTE.update(activo=None, t=0.0)
+    nube.agente_activo = False
+    assert webhook.agente_encendido() is False

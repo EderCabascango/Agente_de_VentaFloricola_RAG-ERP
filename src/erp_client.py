@@ -438,3 +438,28 @@ def guardar_datos_despacho(wa_id: str, pedido_id: str, datos: dict) -> dict:
     if not cfg.ERP_URL:
         raise ERPNoDisponible("El despacho solo funciona con el ERP en la nube.")
     return llamar("POST", "/api/erp/despachos", cuerpo={"wa_id": re.sub(r"\D", "", wa_id or ""), "pedido_id": pedido_id, **datos})
+
+
+_AGENTE = {"activo": None, "t": 0.0}
+_AGENTE_TTL_S = 10
+
+
+def agente_activo_nube() -> bool:
+    """Interruptor de la plataforma: ¿puede el agente responder a los clientes?
+
+    Sin ERP en la nube siempre es True. Se consulta como máximo cada 10 s. Si el ERP no responde se usa el último valor
+    conocido; si nunca se pudo leer, el agente se queda callado (más seguro que responder sin saber si lo apagaron).
+    """
+    import time
+
+    if not cfg.ERP_URL:
+        return True
+    if _AGENTE["activo"] is not None and time.monotonic() - _AGENTE["t"] < _AGENTE_TTL_S:
+        return _AGENTE["activo"]
+    try:
+        _AGENTE.update(activo=bool(llamar("GET", "/api/erp/agente").get("activo")), t=time.monotonic())
+    except ERPNoDisponible as e:
+        log.warning("No se pudo leer el interruptor del agente: %s", e)
+        if _AGENTE["activo"] is None:
+            return False
+    return bool(_AGENTE["activo"])

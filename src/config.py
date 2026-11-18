@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env", override=False)
 
 DB_PATH = Path(os.getenv("ERP_DB_PATH", str(ROOT / "erp.db")))
-EMPRESA = os.getenv("EMPRESA", "Grupo CFG").strip() or "Grupo CFG"
+EMPRESA = os.getenv("EMPRESA", "Rosas del Valle").strip() or "Rosas del Valle"
 # ERP en la nube (Cloudflare D1, ver la plataforma de la landing). Sin ERP_URL se usa el ERP local (erp.db).
 ERP_URL = os.getenv("ERP_URL", "").strip().rstrip("/")
 ERP_TOKEN = os.getenv("ERP_TOKEN", "").strip()

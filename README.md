@@ -1,6 +1,6 @@
 # Agente de ventas por WhatsApp para una florícola (RAG + aprobación humana)
 
-Prototipo de un agente con **LangChain + LangGraph** que atiende por chat a los clientes de una finca de rosas (Grupo CFG): cotiza **solo rosas**, revisa disponibilidad por finca, toma pedidos y responde dudas de envíos, temporadas, reclamos y cuidado de la flor.
+Prototipo de un agente con **LangChain + LangGraph** que atiende por chat a los clientes de una finca de rosas (empresa de demostración «Rosas del Valle»): cotiza **solo rosas**, revisa disponibilidad por finca, toma pedidos y responde dudas de envíos, temporadas, reclamos y cuidado de la flor.
 
 Se puede mostrar de dos formas: en la **demo de Streamlit**, con un chat que imita WhatsApp, o en **WhatsApp real** con la Cloud API de Meta (ver [Canal WhatsApp](#canal-whatsapp-real)). En los dos casos el ERP es sintético.
 
@@ -60,7 +60,7 @@ flowchart TD
 
 | Dato | Valor |
 |---|---|
-| Catálogo | **Solo rosas**: las 203 variedades de Grupo CFG (lista del cliente, no incluida en el repositorio) en largos de 40 a 80 cm. Los precios (entre $0,18 y $0,39 por tallo) y el stock son **inventados**, de demostración. Sin esa lista el repositorio trae 12 variedades de demostración |
+| Catálogo | **Solo rosas**: las 203 variedades del cliente (lista, no incluida en el repositorio) en largos de 40 a 80 cm. Los precios (entre $0,18 y $0,39 por tallo) y el stock son **inventados**, de demostración. Sin esa lista el repositorio trae 12 variedades de demostración |
 | Unidad de venta | Tallo, en **bonches de 25**; **caja completa = 400 tallos**. El cliente puede pedir en tallos, bonches o cajas y el código convierte. Precios FOB Quito en USD por tallo |
 | Fincas con cuarto frío | CAY (Cayambe), TAB (Tabacundo), LAT (Latacunga) |
 | Clientes | 6 importadores y floristerías de EE. UU., Francia, Países Bajos, Rusia y Ecuador, cada uno con su número de WhatsApp |

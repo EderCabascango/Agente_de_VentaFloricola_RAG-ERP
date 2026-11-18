@@ -1,4 +1,4 @@
-# Piloto: agente de ventas por WhatsApp (Grupo CFG) — hoja para auditoría
+# Piloto: agente de ventas por WhatsApp (Rosas del Valle, nombre de demostración) — hoja para auditoría
 
 Esta hoja **no contiene contraseñas ni claves**. Las credenciales se entregan por un canal aparte (ver "Acceso").
 
@@ -46,5 +46,5 @@ La batería con el modelo real cubre: instrucciones de ignorar reglas, pedir el 
 4. **Servicio local:** el agente corre en una computadora con un túnel temporal (ngrok). Si se apaga, el agente deja de responder. Producción real requiere un servidor propio.
 5. **Cuota del modelo:** el plan gratuito de Groq limita los tokens por minuto; puede haber esperas.
 6. **Duplicados:** si el cliente repite el mismo pedido, se crean dos pedidos pendientes; hoy no hay detección.
-7. **Pendiente de negocio:** modelo de venta real (hoy tallo/bonche de 25/caja de 400; CFG usa HB/QB/FB y vende también en el país).
+7. **Pendiente de negocio:** modelo de venta real (hoy tallo/bonche de 25/caja de 400; el cliente real usa HB/QB/FB y vende también en el país).
 8. **Sin pruebas automáticas del Worker en el repositorio:** las 39+34+26 comprobaciones están en scripts locales, no en CI.

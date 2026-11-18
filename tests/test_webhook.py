@@ -320,3 +320,27 @@ def test_ajustes_leen_supervisores_y_testers(monkeypatch):
         monkeypatch.setenv(v, val)
     a = AjustesWhatsApp.desde_entorno()
     assert a.supervisores == {"593987654321", "13050000000"} and a.clientes == {"593991112233": "C003"}
+
+
+def test_agente_apagado_no_responde_ni_marca_leido_y_el_supervisor_lo_enciende(tmp_path, monkeypatch):
+    import webhook
+    monkeypatch.setattr(webhook, "ARCHIVO_APAGADO", tmp_path / "apagado.flag")
+    client, api, llm = _cliente([responder("hola")])
+    _post(client, _payload(SUPERVISOR_WA, "/apagar"))
+    assert not webhook.agente_encendido()
+    antes = len(api.enviados)
+    _post(client, _payload(TESTER_WA, "hola"))
+    assert len(api.enviados) == antes  # silencio total: una persona atiende desde el número
+    assert client.get("/salud").json()["encendido"] is False
+    _post(client, _payload(SUPERVISOR_WA, "/encender"))
+    assert webhook.agente_encendido()
+    _post(client, _payload(TESTER_WA, "hola"))
+    assert api.textos_a(TESTER_WA)
+
+
+def test_un_cliente_no_puede_apagar_el_agente(tmp_path, monkeypatch):
+    import webhook
+    monkeypatch.setattr(webhook, "ARCHIVO_APAGADO", tmp_path / "apagado.flag")
+    client, api, llm = _cliente([responder("ok")])
+    _post(client, _payload(TESTER_WA, "/apagar"))
+    assert webhook.agente_encendido()

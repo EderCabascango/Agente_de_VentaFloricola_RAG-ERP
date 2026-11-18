@@ -23,7 +23,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.types import Command
 
 from src import config as cfg
-from src.erp_client import ERPClient, registrar_auditoria, registrar_cliente_whatsapp, registrar_mensaje
+from src.erp_client import ERPClient, agente_activo_nube, registrar_auditoria, registrar_cliente_whatsapp, registrar_mensaje
 from src.graph import LLMNoDisponible, build_graph, pendiente_de_aprobacion, texto_de, traza_resumida
 from src.whatsapp import formatear_para_whatsapp, hilo_de, normalizar_numero, resumen_pedido_pendiente
 from src.whatsapp_api import (AjustesWhatsApp, ErrorWhatsApp, MensajeEntrante, WhatsAppAPI, extraer_mensajes,
@@ -33,6 +33,21 @@ log = logging.getLogger("whatsapp")
 
 EMPRESA = cfg.EMPRESA
 CONVERSACIONES_DB = cfg.ROOT / "conversaciones.db"
+# Interruptor de apagado: si existe este archivo, el agente NO responde a los clientes (el número queda libre para que
+# una persona escriba). Además hay un interruptor en la plataforma (ERP en la nube). Con /apagar y /encender (supervisor) o a mano se usa el archivo.
+ARCHIVO_APAGADO = cfg.ROOT / "agente_apagado.flag"
+
+
+def agente_encendido() -> bool:
+    """Encendido solo si ni el archivo local ni el interruptor de la plataforma lo apagan."""
+    return not ARCHIVO_APAGADO.exists() and agente_activo_nube()
+
+
+def _poner_agente(encendido: bool) -> None:
+    if encendido:
+        ARCHIVO_APAGADO.unlink(missing_ok=True)
+    else:
+        ARCHIVO_APAGADO.write_text(time.strftime("apagado %Y-%m-%d %H:%M:%S"), encoding="utf-8")
 
 MSG_SOLO_TEXTO = "Por ahora solo puedo leer mensajes de texto 🌹. ¿Me escribe su consulta?"
 MSG_NO_REGISTRADO = (f"¡Hola! Gracias por escribir a {EMPRESA} 🌹. Su número todavía no está registrado como "
@@ -148,6 +163,16 @@ class CanalWhatsApp:
 
     # ------------------------------------------------------------------ entrada
     def procesar(self, msg: MensajeEntrante) -> None:
+        es_supervisor = msg.de in self.ajustes.supervisores
+        comando = msg.texto.strip().lower() if msg.tipo == "text" else ""
+        if es_supervisor and comando in ("/apagar", "/encender", "/estado"):
+            self._interruptor(msg, comando)
+            return
+        # Agente apagado: no se responde ni se marca como leído (así una persona atiende desde el mismo número).
+        # Los botones Aprobar/Rechazar del supervisor siguen funcionando para no dejar pedidos colgados.
+        if not agente_encendido() and not (es_supervisor and msg.boton_id.split(":", 1)[0] in ("aprobar", "rechazar")):
+            log.info("Agente apagado: mensaje %s de +%s ignorado", msg.id, msg.de)
+            return
         self.api.marcar_leido(msg.id)
         try:
             if msg.de in self.ajustes.supervisores and msg.boton_id.split(":", 1)[0] in ("aprobar", "rechazar"):
@@ -161,6 +186,19 @@ class CanalWhatsApp:
         except Exception:  # noqa: BLE001 — el webhook no debe caerse por un mensaje
             log.exception("Error procesando el mensaje %s", msg.id)
             self._enviar(msg.de, MSG_ERROR)
+
+    def _interruptor(self, msg: MensajeEntrante, comando: str) -> None:
+        if comando == "/apagar":
+            _poner_agente(False)
+            registrar_auditoria(f"supervisor +{msg.de}", "AGENTE_APAGADO", {}, "Comando /apagar")
+            self._enviar(msg.de, "Agente *apagado*. No responderá a ningún cliente hasta que escriba /encender.")
+        elif comando == "/encender":
+            _poner_agente(True)
+            registrar_auditoria(f"supervisor +{msg.de}", "AGENTE_ENCENDIDO", {}, "Comando /encender")
+            self._enviar(msg.de, "Agente *encendido*. Vuelve a responder a los clientes.")
+        else:
+            self._enviar(msg.de, "El agente está *encendido*." if agente_encendido() else
+                         "El agente está *apagado*. Escriba /encender para reactivarlo.")
 
     def _reiniciar(self, msg: MensajeEntrante) -> None:
         """Comando del piloto: el supervisor borra su propia conversación (y un pedido pendiente) para probar de cero."""
@@ -274,7 +312,7 @@ def crear_app(grafo=None, api: Optional[WhatsAppAPI] = None, ajustes: Optional[A
 
     @app.get("/salud")
     def salud() -> dict:
-        return {"ok": True, "proveedor": cfg.proveedor_actual(), "supervisores": len(ajustes.supervisores)}
+        return {"ok": True, "encendido": agente_encendido(), "proveedor": cfg.proveedor_actual(), "supervisores": len(ajustes.supervisores)}
 
     @app.get("/webhook", response_class=PlainTextResponse)
     def verificar(hub_mode: str = Query("", alias="hub.mode"), hub_token: str = Query("", alias="hub.verify_token"),

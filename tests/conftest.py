@@ -48,3 +48,13 @@ def erp_limpio(monkeypatch):
     import src.rag
     monkeypatch.setattr(src.rag, "buscar", buscar_fake)
     yield config.DB_PATH
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _interruptor_aislado(tmp_path, monkeypatch):
+    """Las pruebas nunca leen el interruptor real del agente (agente_apagado.flag)."""
+    import webhook
+    monkeypatch.setattr(webhook, "ARCHIVO_APAGADO", tmp_path / "agente_apagado.flag")

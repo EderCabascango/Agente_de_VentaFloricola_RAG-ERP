@@ -37,3 +37,6 @@ Thumbs.db
 .vscode/
 .idea/
 .claude/
+
+# Interruptor del agente (estado local)
+agente_apagado.flag
